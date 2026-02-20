@@ -64,12 +64,10 @@ public class ChatTabHandler {
             return;
         }
 
-        // Use colors from Settings/Data
-        int bgColor = data.getHex(data.colorBackground, 238); // 0xEE Alpha
-        int topBarColor = data.getHex(data.colorTopBar, 85);  // 0x55 Alpha
-        int accentColor = data.getHex(data.colorSelection, 255); // 0xFF Alpha
+        int bgColor = data.getHex(data.colorBackground, 238);
+        int topBarColor = data.getHex(data.colorTopBar, 85);
+        int accentColor = data.getHex(data.colorSelection, 255);
 
-        // --- Window Logic ---
         int minWidth = 50;
         for (String s : data.tabs) minWidth += mc.fontRendererObj.getStringWidth(s) + 22;
 
@@ -87,21 +85,16 @@ public class ChatTabHandler {
             isResizing = false;
         }
 
-        // Draw Main Body and Header
         Gui.drawRect(data.windowX, data.windowY, data.windowX + data.windowWidth, data.windowY + data.windowHeight, bgColor);
         Gui.drawRect(data.windowX, data.windowY, data.windowX + data.windowWidth, data.windowY + 22, topBarColor);
 
-        // Gear Icon (Right aligned)
         mc.fontRendererObj.drawString("\u2699", data.windowX + data.windowWidth - 15, data.windowY + 7, 0xFFFFFF);
 
         int currentX = data.windowX + 5;
         for (int i = 0; i < data.tabs.size(); i++) {
             int textWidth = (i == editingTabIndex && renameField != null) ? mc.fontRendererObj.getStringWidth(renameField.getText()) : mc.fontRendererObj.getStringWidth(data.tabs.get(i));
             int tabWidth = textWidth + 18;
-
-            // Selection underline uses accentColor
             if (i == selectedTabIndex) Gui.drawRect(currentX, data.windowY + 20, currentX + tabWidth, data.windowY + 22, accentColor);
-
             if (i == editingTabIndex && renameField != null) {
                 renameField.xPosition = currentX + 9;
                 renameField.yPosition = data.windowY + 7;
@@ -113,15 +106,11 @@ public class ChatTabHandler {
             currentX += tabWidth + 4;
         }
 
-        // Plus Button
         int plusX = currentX;
         Gui.drawRect(plusX, data.windowY + 4, plusX + 15, data.windowY + 18, 0x55FFFFFF);
         mc.fontRendererObj.drawString("+", plusX + 5, data.windowY + 7, 0xFFFFFF);
-
-        // Resize Handle (Bottom Right) uses accentColor
         Gui.drawRect(data.windowX + data.windowWidth - 5, data.windowY + data.windowHeight - 5, data.windowX + data.windowWidth, data.windowY + data.windowHeight, accentColor);
 
-        // Message Rendering
         List<String> history = data.chatHistories.get(selectedTabIndex);
         if (history != null) {
             int messageY = data.windowY + data.windowHeight - 12;
@@ -142,7 +131,6 @@ public class ChatTabHandler {
     @SubscribeEvent
     public void onMouseClick(GuiScreenEvent.MouseInputEvent.Pre event) {
         if (!(event.gui instanceof GuiChat) || !Mouse.getEventButtonState()) return;
-
         Minecraft mc = Minecraft.getMinecraft();
         int mouseX = Mouse.getEventX() * event.gui.width / mc.displayWidth;
         int mouseY = event.gui.height - Mouse.getEventY() * event.gui.height / mc.displayHeight - 1;
@@ -153,20 +141,17 @@ public class ChatTabHandler {
             return;
         }
 
-        // Gear Click detection
         if (button == 0 && mouseX >= data.windowX + data.windowWidth - 20 && mouseX <= data.windowX + data.windowWidth && mouseY >= data.windowY && mouseY <= data.windowY + 22) {
             isSettingsOpen = true;
             mc.thePlayer.playSound("gui.button.press", 1.0F, 1.0F);
             return;
         }
 
-        // Resize detection
         if (button == 0 && mouseX >= data.windowX + data.windowWidth - 10 && mouseY >= data.windowY + data.windowHeight - 10) {
             isResizing = true;
             return;
         }
 
-        // Header/Tabs detection
         if (mouseX >= data.windowX && mouseX <= data.windowX + data.windowWidth && mouseY >= data.windowY && mouseY <= data.windowY + 22) {
             int currentX = data.windowX + 5;
             for (int i = 0; i < data.tabs.size(); i++) {
@@ -177,13 +162,11 @@ public class ChatTabHandler {
                 }
                 currentX += tabWidth + 4;
             }
-
             if (button == 0 && mouseX >= currentX && mouseX <= currentX + 15) {
                 data.addTab();
                 mc.thePlayer.playSound("gui.button.press", 1.0F, 1.0F);
                 return;
             }
-
             if (button == 0) {
                 isDragging = true;
                 dragOffsetX = mouseX - data.windowX;
@@ -221,15 +204,11 @@ public class ChatTabHandler {
     @SubscribeEvent
     public void onKeyTyped(GuiScreenEvent.KeyboardInputEvent.Pre event) {
         if (isSettingsOpen) {
-            if (Keyboard.getEventKey() == Keyboard.KEY_ESCAPE) {
-                isSettingsOpen = false;
-            } else {
-                settings.keyTyped(Keyboard.getEventCharacter(), Keyboard.getEventKey());
-            }
+            if (Keyboard.getEventKey() == Keyboard.KEY_ESCAPE) isSettingsOpen = false;
+            else settings.keyTyped(Keyboard.getEventCharacter(), Keyboard.getEventKey());
             event.setCanceled(true);
             return;
         }
-
         if (editingTabIndex != -1 && renameField != null) {
             if (Keyboard.getEventKey() == Keyboard.KEY_RETURN) {
                 if (!renameField.getText().trim().isEmpty()) {
@@ -237,11 +216,8 @@ public class ChatTabHandler {
                     data.save();
                 }
                 editingTabIndex = -1;
-            } else if (Keyboard.getEventKey() == Keyboard.KEY_ESCAPE) {
-                editingTabIndex = -1;
-            } else {
-                renameField.textboxKeyTyped(Keyboard.getEventCharacter(), Keyboard.getEventKey());
-            }
+            } else if (Keyboard.getEventKey() == Keyboard.KEY_ESCAPE) editingTabIndex = -1;
+            else renameField.textboxKeyTyped(Keyboard.getEventCharacter(), Keyboard.getEventKey());
             event.setCanceled(true);
         }
     }
