@@ -31,24 +31,30 @@ public class ChatTabHandler {
 
     @SubscribeEvent
     public void onChatReceived(ClientChatReceivedEvent event) {
-        String plain = event.message.getUnformattedText();
+        String plain = event.message.getUnformattedText().toLowerCase();
         String formatted = event.message.getFormattedText();
         Minecraft mc = Minecraft.getMinecraft();
-        boolean isFromMe = plain.startsWith("<" + mc.thePlayer.getName() + ">") || plain.startsWith(mc.thePlayer.getName() + ":");
 
-        if (isFromMe) {
-            if (data.chatHistories.containsKey(selectedTabIndex)) data.chatHistories.get(selectedTabIndex).add(formatted);
-            if (selectedTabIndex != 0) data.chatHistories.get(0).add(formatted);
-        } else {
-            boolean filtered = false;
-            for (int i = 1; i < data.tabs.size(); i++) {
-                if (plain.toLowerCase().contains(data.tabs.get(i).toLowerCase())) {
-                    data.chatHistories.get(i).add(formatted);
-                    filtered = true;
-                    break;
+        boolean sorted = false;
+
+        // Check every tab's keywords (skipping Global/Index 0 usually, but checking all for flexibility)
+        for (int i = 0; i < data.tabs.size(); i++) {
+            String filterStr = data.tabFilters.getOrDefault(i, "");
+            if (!filterStr.isEmpty()) {
+                String[] keywords = filterStr.split(",");
+                for (String key : keywords) {
+                    if (!key.trim().isEmpty() && plain.contains(key.trim().toLowerCase())) {
+                        data.chatHistories.get(i).add(formatted);
+                        sorted = true;
+                        break;
+                    }
                 }
             }
-            if (!filtered) data.chatHistories.get(0).add(formatted);
+        }
+
+        // If no keyword matched, or it's from the player, put in Global (Index 0)
+        if (!sorted) {
+            data.chatHistories.get(0).add(formatted);
         }
     }
 
