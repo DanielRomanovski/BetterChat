@@ -7,17 +7,23 @@ import java.util.*;
 public class ChatTabData {
     public final List<String> tabs = new ArrayList<>();
     public final Map<Integer, List<String>> chatHistories = new HashMap<>();
-    public final Map<Integer, String> tabFilters = new HashMap<>(); // Stores keywords like "hello,test,world"
+    public final Map<Integer, String> tabFilters = new HashMap<>();
+    public final Map<Integer, Boolean> serverMessageFilters = new HashMap<>();
+    public final Map<Integer, Integer> scrollOffsets = new HashMap<>();
+
     private final File configFile;
+    private final File logFile;
 
     public int windowX = 20, windowY = 20, windowWidth = 340, windowHeight = 172;
-
-    public String colorSelection = "00FFFF";
-    public String colorTopBar = "000000";
-    public String colorBackground = "1A1E24";
+    public String colorSelection = "00FFFF", colorTopBar = "000000", colorBackground = "1A1E24";
+    public boolean hideDefaultChat = true;
+    public boolean saveChatLog = true;
 
     public ChatTabData() {
-        this.configFile = new File(Minecraft.getMinecraft().mcDataDir, "config/cleanchat.txt");
+        File configDir = new File(Minecraft.getMinecraft().mcDataDir, "config");
+        if (!configDir.exists()) configDir.mkdirs();
+        this.configFile = new File(configDir, "cleanchat.txt");
+        this.logFile = new File(configDir, "cleanchat_logs.dat");
         load();
     }
 
@@ -30,17 +36,25 @@ public class ChatTabData {
     public void save() {
         try (PrintWriter writer = new PrintWriter(new FileWriter(configFile))) {
             writer.println("POS:" + windowX + "," + windowY + "," + windowWidth + "," + windowHeight);
-            writer.println("STYLE:" + colorSelection + "," + colorTopBar + "," + colorBackground);
+            writer.println("STYLE:" + colorSelection + "," + colorTopBar + "," + colorBackground + "," + hideDefaultChat + "," + saveChatLog);
             for (int i = 0; i < tabs.size(); i++) {
                 String filter = tabFilters.getOrDefault(i, "");
-                writer.println("TAB:" + tabs.get(i) + "|" + filter);
+                boolean serverMsgs = serverMessageFilters.getOrDefault(i, false);
+                writer.println("TAB:" + tabs.get(i) + "|" + filter + "|" + serverMsgs);
             }
+            if (saveChatLog) saveHistory();
         } catch (IOException e) { e.printStackTrace(); }
     }
 
+    private void saveHistory() {
+        try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(logFile))) {
+            oos.writeObject(chatHistories);
+        } catch (IOException e) { e.printStackTrace(); }
+    }
+
+    @SuppressWarnings("unchecked")
     public void load() {
-        tabs.clear();
-        tabFilters.clear();
+        tabs.clear(); tabFilters.clear(); serverMessageFilters.clear();
         if (configFile.exists()) {
             try (BufferedReader reader = new BufferedReader(new FileReader(configFile))) {
                 String line;
@@ -51,34 +65,43 @@ public class ChatTabData {
                         windowWidth = Integer.parseInt(p[2]); windowHeight = Integer.parseInt(p[3]);
                     } else if (line.startsWith("STYLE:")) {
                         String[] s = line.substring(6).split(",");
-                        if (s.length >= 3) {
-                            colorSelection = s[0]; colorTopBar = s[1]; colorBackground = s[2];
-                        }
+                        if (s.length >= 3) { colorSelection = s[0]; colorTopBar = s[1]; colorBackground = s[2]; }
+                        if (s.length >= 4) hideDefaultChat = Boolean.parseBoolean(s[3]);
+                        if (s.length >= 5) saveChatLog = Boolean.parseBoolean(s[4]);
                     } else if (line.startsWith("TAB:")) {
-                        String content = line.substring(4);
-                        String[] parts = content.split("\\|", 2);
+                        String[] parts = line.substring(4).split("\\|");
                         tabs.add(parts[0]);
-                        if (parts.length > 1) tabFilters.put(tabs.size() - 1, parts[1]);
+                        int idx = tabs.size() - 1;
+                        if (parts.length > 1) tabFilters.put(idx, parts[1]);
+                        if (parts.length > 2) serverMessageFilters.put(idx, Boolean.parseBoolean(parts[2]));
                     }
                 }
             } catch (Exception e) { e.printStackTrace(); }
         }
         if (tabs.isEmpty()) tabs.add("Global");
-        for (int i = 0; i < tabs.size(); i++) chatHistories.put(i, new ArrayList<String>());
+        for (int i = 0; i < tabs.size(); i++) {
+            if (!chatHistories.containsKey(i)) chatHistories.put(i, new ArrayList<String>());
+            scrollOffsets.put(i, 0);
+        }
+        if (saveChatLog && logFile.exists()) {
+            try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(logFile))) {
+                Map<Integer, List<String>> loaded = (Map<Integer, List<String>>) ois.readObject();
+                chatHistories.putAll(loaded);
+            } catch (Exception e) { e.printStackTrace(); }
+        }
     }
 
     public void addTab() {
-        tabs.add("New Tab");
-        chatHistories.put(tabs.size()-1, new ArrayList<String>());
-        tabFilters.put(tabs.size()-1, "");
+        tabs.add("New Tab"); int idx = tabs.size() - 1;
+        chatHistories.put(idx, new ArrayList<String>()); tabFilters.put(idx, "");
+        serverMessageFilters.put(idx, false); scrollOffsets.put(idx, 0);
         save();
     }
 
     public void deleteTab(int idx) {
         if (tabs.size() > 1 && idx != 0) {
-            tabs.remove(idx);
-            chatHistories.remove(idx);
-            tabFilters.remove(idx);
+            tabs.remove(idx); chatHistories.remove(idx); tabFilters.remove(idx);
+            serverMessageFilters.remove(idx); scrollOffsets.remove(idx);
             save();
         }
     }
