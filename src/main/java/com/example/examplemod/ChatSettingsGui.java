@@ -7,7 +7,7 @@ import net.minecraft.client.gui.ScaledResolution;
 
 public class ChatSettingsGui {
     private final ChatTabData data;
-    private GuiTextField selInput, topInput, bgInput, filterInput;
+    private GuiTextField selInput, topInput, bgInput, filterInput, prefixInput, suffixInput;
     private String currentPage = "CUSTOM";
     private int selectedFilterTab = 0;
 
@@ -18,35 +18,49 @@ public class ChatSettingsGui {
         topInput = new GuiTextField(1, mc.fontRendererObj, 0, 0, 60, 12);
         bgInput = new GuiTextField(2, mc.fontRendererObj, 0, 0, 60, 12);
         filterInput = new GuiTextField(3, mc.fontRendererObj, 0, 0, 150, 12);
+        prefixInput = new GuiTextField(4, mc.fontRendererObj, 0, 0, 70, 12);
+        suffixInput = new GuiTextField(5, mc.fontRendererObj, 0, 0, 70, 12);
         selInput.setText(data.colorSelection);
         topInput.setText(data.colorTopBar);
         bgInput.setText(data.colorBackground);
         updateFilterPage();
     }
 
-    private void updateFilterPage() { filterInput.setText(data.tabFilters.getOrDefault(selectedFilterTab, "")); }
+    private void updateFilterPage() {
+        filterInput.setText(data.tabFilters.getOrDefault(selectedFilterTab, ""));
+        prefixInput.setText(data.tabPrefixes.getOrDefault(selectedFilterTab, ""));
+        suffixInput.setText(data.tabSuffixes.getOrDefault(selectedFilterTab, ""));
+    }
 
-    public void draw(int mouseX, int mouseY) {
+    public void draw(int mx, int my) {
         Minecraft mc = Minecraft.getMinecraft();
         ScaledResolution sr = new ScaledResolution(mc);
         int x = (sr.getScaledWidth() - 250) / 2;
         int y = (sr.getScaledHeight() - 200) / 2;
         Gui.drawRect(x, y, x + 250, y + 200, 0xFF1A1E24);
         Gui.drawRect(x, y, x + 250, y + 25, 0xFF000000);
-        drawNavButton("Customization", x + 5, y + 5, currentPage.equals("CUSTOM"), mouseX, mouseY);
-        drawNavButton("Filters", x + 100, y + 5, currentPage.equals("FILTER"), mouseX, mouseY);
+        drawNavButton("Customization", x + 5, y + 5, currentPage.equals("CUSTOM"), mx, my);
+        drawNavButton("Filters", x + 100, y + 5, currentPage.equals("FILTER"), mx, my);
+
         if (currentPage.equals("CUSTOM")) {
             renderSetting(x + 20, y + 50, "Selection (#):", selInput);
             renderSetting(x + 20, y + 80, "Top Bar (#):", topInput);
             renderSetting(x + 20, y + 110, "Background (#):", bgInput);
             drawCheckbox(x + 20, y + 140, data.hideDefaultChat, "Remove Default Chat", mc);
             drawCheckbox(x + 20, y + 160, data.saveChatLog, "Save All Chat Log", mc);
+            drawCheckbox(x + 20, y + 180, data.isLocked, "Lock Chat At Current Position", mc);
         } else {
-            mc.fontRendererObj.drawString("Tab: " + data.tabs.get(selectedFilterTab), x + 20, y + 40, 0x00FFFF);
-            mc.fontRendererObj.drawString("Keywords:", x + 20, y + 60, 0xAAAAAA);
-            filterInput.xPosition = x + 20; filterInput.yPosition = y + 72; filterInput.drawTextBox();
-            boolean isChecked = data.serverMessageFilters.getOrDefault(selectedFilterTab, false);
-            drawCheckbox(x + 20, y + 100, isChecked, "Include Server Messages", mc);
+            mc.fontRendererObj.drawString("Tab: " + data.tabs.get(selectedFilterTab), x + 20, y + 35, 0x00FFFF);
+            mc.fontRendererObj.drawString("Prefix:", x + 20, y + 50, 0xAAAAAA);
+            prefixInput.xPosition = x + 60; prefixInput.yPosition = y + 48; prefixInput.drawTextBox();
+            mc.fontRendererObj.drawString("Suffix:", x + 140, y + 50, 0xAAAAAA);
+            suffixInput.xPosition = x + 175; suffixInput.yPosition = y + 48; suffixInput.drawTextBox();
+            mc.fontRendererObj.drawString("Keywords:", x + 20, y + 68, 0xAAAAAA);
+            filterInput.xPosition = x + 20; filterInput.yPosition = y + 78; filterInput.drawTextBox();
+            drawCheckbox(x + 20, y + 95, data.includeAllFilters.getOrDefault(selectedFilterTab, false), "Include ALL Messages", mc);
+            drawCheckbox(x + 20, y + 110, data.includeCommandsFilters.getOrDefault(selectedFilterTab, false), "Include Commands", mc);
+            drawCheckbox(x + 20, y + 125, data.serverMessageFilters.getOrDefault(selectedFilterTab, false), "Include Server Messages", mc);
+            drawCheckbox(x + 20, y + 140, data.includePlayersFilters.getOrDefault(selectedFilterTab, false), "Include Player Messages", mc);
             int tx = x + 20;
             for (int i = 0; i < data.tabs.size(); i++) {
                 int color = (i == selectedFilterTab) ? 0x00FFFF : 0x555555;
@@ -57,9 +71,9 @@ public class ChatSettingsGui {
     }
 
     private void drawCheckbox(int x, int y, boolean active, String label, Minecraft mc) {
-        Gui.drawRect(x, y, x + 10, y + 10, 0xFF333333);
-        if (active) mc.fontRendererObj.drawString("v", x + 2, y + 1, 0x00FFFF);
-        mc.fontRendererObj.drawString(label, x + 15, y + 1, 0xFFFFFF);
+        Gui.drawRect(x, y, x + 8, y + 8, 0xFF333333);
+        if (active) mc.fontRendererObj.drawString("v", x + 1, y - 1, 0x00FFFF);
+        mc.fontRendererObj.drawString(label, x + 12, y, 0xFFFFFF);
     }
 
     private void drawNavButton(String text, int x, int y, boolean active, int mx, int my) {
@@ -74,26 +88,27 @@ public class ChatSettingsGui {
         field.xPosition = x + 100; field.yPosition = y - 2; field.drawTextBox();
     }
 
-    public void mouseClicked(int mouseX, int mouseY, int btn) {
+    public void mouseClicked(int mx, int my, int btn) {
         ScaledResolution sr = new ScaledResolution(Minecraft.getMinecraft());
         int x = (sr.getScaledWidth() - 250) / 2;
         int y = (sr.getScaledHeight() - 200) / 2;
-        if (mouseX >= x + 5 && mouseX <= x + 90 && mouseY >= y + 5 && mouseY <= y + 20) currentPage = "CUSTOM";
-        if (mouseX >= x + 100 && mouseX <= x + 180 && mouseY >= y + 5 && mouseY <= y + 20) currentPage = "FILTER";
+        if (mx >= x + 5 && mx <= x + 90 && my >= y + 5 && my <= y + 20) currentPage = "CUSTOM";
+        if (mx >= x + 100 && mx <= x + 180 && my >= y + 5 && my <= y + 20) currentPage = "FILTER";
         if (currentPage.equals("CUSTOM")) {
-            selInput.mouseClicked(mouseX, mouseY, btn); topInput.mouseClicked(mouseX, mouseY, btn); bgInput.mouseClicked(mouseX, mouseY, btn);
-            if (mouseX >= x + 20 && mouseX <= x + 150 && mouseY >= y + 140 && mouseY <= y + 150) data.hideDefaultChat = !data.hideDefaultChat;
-            if (mouseX >= x + 20 && mouseX <= x + 150 && mouseY >= y + 160 && mouseY <= y + 170) data.saveChatLog = !data.saveChatLog;
+            selInput.mouseClicked(mx, my, btn); topInput.mouseClicked(mx, my, btn); bgInput.mouseClicked(mx, my, btn);
+            if (mx >= x + 20 && mx <= x + 150 && my >= y + 140 && my <= y + 150) data.hideDefaultChat = !data.hideDefaultChat;
+            if (mx >= x + 20 && mx <= x + 150 && my >= y + 160 && my <= y + 170) data.saveChatLog = !data.saveChatLog;
+            if (mx >= x + 20 && mx <= x + 200 && my >= y + 180 && my <= y + 190) data.isLocked = !data.isLocked;
         } else {
-            filterInput.mouseClicked(mouseX, mouseY, btn);
-            if (mouseX >= x + 20 && mouseX <= x + 150 && mouseY >= y + 100 && mouseY <= y + 110) {
-                boolean current = data.serverMessageFilters.getOrDefault(selectedFilterTab, false);
-                data.serverMessageFilters.put(selectedFilterTab, !current);
-            }
+            filterInput.mouseClicked(mx, my, btn); prefixInput.mouseClicked(mx, my, btn); suffixInput.mouseClicked(mx, my, btn);
+            if (mx >= x + 20 && mx <= x + 150 && my >= y + 95 && my <= y + 105) data.includeAllFilters.put(selectedFilterTab, !data.includeAllFilters.getOrDefault(selectedFilterTab, false));
+            if (mx >= x + 20 && mx <= x + 150 && my >= y + 110 && my <= y + 120) data.includeCommandsFilters.put(selectedFilterTab, !data.includeCommandsFilters.getOrDefault(selectedFilterTab, false));
+            if (mx >= x + 20 && mx <= x + 150 && my >= y + 125 && my <= y + 135) data.serverMessageFilters.put(selectedFilterTab, !data.serverMessageFilters.getOrDefault(selectedFilterTab, false));
+            if (mx >= x + 20 && mx <= x + 150 && my >= y + 140 && my <= y + 150) data.includePlayersFilters.put(selectedFilterTab, !data.includePlayersFilters.getOrDefault(selectedFilterTab, false));
             int tx = x + 20;
             for (int i = 0; i < data.tabs.size(); i++) {
                 int tw = Minecraft.getMinecraft().fontRendererObj.getStringWidth("[" + data.tabs.get(i) + "]");
-                if (mouseX >= tx && mouseX <= tx + tw && mouseY >= y + 160 && mouseY <= y + 170) { selectedFilterTab = i; updateFilterPage(); }
+                if (mx >= tx && mx <= tx + tw && my >= y + 160 && my <= y + 170) { selectedFilterTab = i; updateFilterPage(); }
                 tx += tw + 5;
             }
         }
@@ -102,9 +117,18 @@ public class ChatSettingsGui {
 
     public void keyTyped(char c, int code) {
         if (currentPage.equals("CUSTOM")) {
-            selInput.textboxKeyTyped(c, code); topInput.textboxKeyTyped(c, code); bgInput.textboxKeyTyped(c, code);
+            if (selInput.isFocused()) selInput.textboxKeyTyped(c, code);
+            if (topInput.isFocused()) topInput.textboxKeyTyped(c, code);
+            if (bgInput.isFocused()) bgInput.textboxKeyTyped(c, code);
             data.colorSelection = selInput.getText(); data.colorTopBar = topInput.getText(); data.colorBackground = bgInput.getText();
-        } else { filterInput.textboxKeyTyped(c, code); data.tabFilters.put(selectedFilterTab, filterInput.getText()); }
+        } else {
+            if (filterInput.isFocused()) filterInput.textboxKeyTyped(c, code);
+            if (prefixInput.isFocused()) prefixInput.textboxKeyTyped(c, code);
+            if (suffixInput.isFocused()) suffixInput.textboxKeyTyped(c, code);
+            data.tabFilters.put(selectedFilterTab, filterInput.getText());
+            data.tabPrefixes.put(selectedFilterTab, prefixInput.getText());
+            data.tabSuffixes.put(selectedFilterTab, suffixInput.getText());
+        }
         data.save();
     }
 }
