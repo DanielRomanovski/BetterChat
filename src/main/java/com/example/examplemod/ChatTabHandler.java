@@ -44,7 +44,7 @@ public class ChatTabHandler {
     // Tab drag state — tracks a single tab being dragged globally across windows
     private boolean isDraggingTab = false;
     private int draggingTabGlobalIndex = -1;   // which global tab is being dragged
-    private int draggingTabSourceWindow = -1;  // window it came from
+    private ChatTabData.ChatWindowInstance draggingTabSourceWindow = null;  // window it came from (by reference)
     private int dragTabVisualX = 0, dragTabVisualY = 0; // current mouse position for ghost rendering
     private int dragTabMouseOffsetX = 0;
     // When the tab has been "detached" (mouse left top bar), we show a ghost and look for drop targets
@@ -261,21 +261,23 @@ public class ChatTabHandler {
                 // Determine drop target window (not the source)
                 dropTargetWindowIndex = -1;
                 for (int w = 0; w < data.windows.size(); w++) {
-                    if (w == draggingTabSourceWindow) continue;
                     ChatTabData.ChatWindowInstance win = data.windows.get(w);
+                    if (win == draggingTabSourceWindow) continue;
                     if (mx >= win.x && mx <= win.x + win.width && my >= win.y && my <= win.y + 22) {
                         dropTargetWindowIndex = w; break;
                     }
                 }
                 // Check if re-attaching to source window (mouse re-enters its top bar)
-                if (!tabIsDetached) {
-                    ChatTabData.ChatWindowInstance src = data.windows.get(draggingTabSourceWindow);
-                    if (my < src.y - 20 || my > src.y + 22 + 20) tabIsDetached = true;
+                if (draggingTabSourceWindow != null && data.windows.contains(draggingTabSourceWindow)) {
+                    ChatTabData.ChatWindowInstance src = draggingTabSourceWindow;
+                    if (!tabIsDetached) {
+                        if (my < src.y - 20 || my > src.y + 22 + 20) tabIsDetached = true;
+                    } else {
+                        if (mx >= src.x && mx <= src.x + src.width && my >= src.y && my <= src.y + 22)
+                            tabIsDetached = false;
+                    }
                 } else {
-                    // Check if hovering back into source window to re-attach
-                    ChatTabData.ChatWindowInstance src = data.windows.get(draggingTabSourceWindow);
-                    if (mx >= src.x && mx <= src.x + src.width && my >= src.y && my <= src.y + 22)
-                        tabIsDetached = false;
+                    tabIsDetached = true;
                 }
             }
         }
@@ -382,23 +384,27 @@ public class ChatTabHandler {
     // -------------------------------------------------------------------------
     private void finalizeDrop(int mx, int my, ScaledResolution sr) {
         isDraggingTab = false;
-        if (draggingTabGlobalIndex < 0 || draggingTabGlobalIndex >= data.tabs.size()) return;
+        if (draggingTabGlobalIndex < 0 || draggingTabGlobalIndex >= data.tabs.size()) {
+            draggingTabGlobalIndex = -1; draggingTabSourceWindow = null;
+            dropTargetWindowIndex = -1; tabIsDetached = false;
+            return;
+        }
 
         if (!tabIsDetached) {
             // Dropped back in source window — nothing to do (it was never removed)
-        } else if (dropTargetWindowIndex != -1) {
+        } else if (dropTargetWindowIndex != -1 && dropTargetWindowIndex < data.windows.size()) {
             // Merge into target window
             data.mergeTabIntoWindow(draggingTabGlobalIndex, dropTargetWindowIndex);
         } else {
-            // Detach: only spawn new window if source window has >1 tab
-            int srcWin = draggingTabSourceWindow;
-            if (srcWin < data.windows.size() && data.windows.get(srcWin).tabIndices.size() > 1) {
+            // Detach: only spawn new window if source window still exists and has >1 tab
+            ChatTabData.ChatWindowInstance srcWin = draggingTabSourceWindow;
+            if (srcWin != null && data.windows.contains(srcWin) && srcWin.tabIndices.size() > 1) {
                 data.detachTab(draggingTabGlobalIndex, mx - 20, my - 11);
             }
             // If source has only 1 tab, don't detach (keep it in place)
         }
         draggingTabGlobalIndex = -1;
-        draggingTabSourceWindow = -1;
+        draggingTabSourceWindow = null;
         dropTargetWindowIndex = -1;
         tabIsDetached = false;
         data.save();
@@ -592,12 +598,18 @@ public class ChatTabHandler {
                 // [+] button
                 if (btn == 0 && mx >= cx && mx <= cx + 20) {
                     data.addTab();
+                    pendingDeleteGlobalIndex = -1;
+                    editingTabGlobalIndex = -1;
                     // New tab added to window 0 by default — if this is another window, move it here
-                    if (w != 0) {
+                    if (w != 0 && !data.windows.isEmpty()) {
                         int newIdx = data.tabs.size() - 1;
-                        data.windows.get(0).tabIndices.remove((Integer)newIdx);
-                        win.tabIndices.add(newIdx);
-                        data.save();
+                        // find which window it ended up in (may not be index 0 if window 0 was removed)
+                        int winOfNew = data.windowIndexForTab(newIdx);
+                        if (winOfNew != w && winOfNew != -1) {
+                            data.windows.get(winOfNew).tabIndices.remove((Integer)newIdx);
+                            data.windows.get(w).tabIndices.add(newIdx);
+                            data.save();
+                        }
                     }
                     ScaledResolution sr2 = new ScaledResolution(Minecraft.getMinecraft());
                     clampWindowToScreen(win, sr2);
@@ -628,7 +640,7 @@ public class ChatTabHandler {
                 // Begin tab drag
                 isDraggingTab = true;
                 draggingTabGlobalIndex = globalIdx;
-                draggingTabSourceWindow = winIdx;
+                draggingTabSourceWindow = win;
                 dragTabMouseOffsetX = mx - tabX;
                 dragTabVisualX = mx; dragTabVisualY = win.y + 11;
                 tabIsDetached = false;
@@ -636,9 +648,17 @@ public class ChatTabHandler {
             }
         } else if (btn == 1) {
             if (pendingDeleteGlobalIndex == globalIdx) {
-                data.deleteTab(globalIdx);
                 pendingDeleteGlobalIndex = -1; editingTabGlobalIndex = -1;
-            } else pendingDeleteGlobalIndex = globalIdx;
+                data.deleteTab(globalIdx);
+                // After deletion the window list may have changed; reset stale drag/tab state
+                isDraggingTab = false;
+                draggingTabGlobalIndex = -1;
+                draggingTabSourceWindow = null;
+                tabIsDetached = false;
+                dropTargetWindowIndex = -1;
+            } else {
+                pendingDeleteGlobalIndex = globalIdx;
+            }
         }
         lastClickTime = System.currentTimeMillis(); lastClickedGlobalIndex = globalIdx;
     }

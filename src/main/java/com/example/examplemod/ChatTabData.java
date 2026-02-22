@@ -124,8 +124,8 @@ public class ChatTabData {
             win.tabIndices.remove((Integer) globalTabIdx);
             if (win.selectedLocalTab >= win.tabIndices.size()) win.selectedLocalTab = Math.max(0, win.tabIndices.size() - 1);
         }
-        // Remove empty non-primary windows
-        for (int w = windows.size() - 1; w >= 1; w--) {
+        // Remove ALL empty windows (including window 0)
+        for (int w = windows.size() - 1; w >= 0; w--) {
             if (windows.get(w).tabIndices.isEmpty()) windows.remove(w);
         }
         // Create new window for this tab
@@ -149,13 +149,19 @@ public class ChatTabData {
             win.tabIndices.remove((Integer) globalTabIdx);
             if (win.selectedLocalTab >= win.tabIndices.size()) win.selectedLocalTab = Math.max(0, win.tabIndices.size() - 1);
         }
-        // Remove empty non-primary windows (index may have shifted, rebuild)
-        for (int w = windows.size() - 1; w >= 1; w--) {
+        // Remove ALL empty windows (including window 0)
+        for (int w = windows.size() - 1; w >= 0; w--) {
             if (windows.get(w).tabIndices.isEmpty()) windows.remove(w);
         }
         // Re-find target after potential removal
-        if (targetWindowIdx >= windows.size()) targetWindowIdx = 0;
-        windows.get(targetWindowIdx).tabIndices.add(globalTabIdx);
+        int newTargetIdx = windows.indexOf(target);
+        if (newTargetIdx == -1) newTargetIdx = 0;
+        if (newTargetIdx < windows.size()) {
+            windows.get(newTargetIdx).tabIndices.add(globalTabIdx);
+        } else {
+            // Target was removed (was empty), just add to first available window
+            if (!windows.isEmpty()) windows.get(0).tabIndices.add(globalTabIdx);
+        }
         save();
     }
 
@@ -366,9 +372,15 @@ public class ChatTabData {
             }
             if (win.selectedLocalTab >= win.tabIndices.size()) win.selectedLocalTab = Math.max(0, win.tabIndices.size() - 1);
         }
-        // Remove empty non-primary windows
-        for (int w = windows.size() - 1; w >= 1; w--) {
+        // Remove ALL empty windows (including window 0 if it becomes empty)
+        for (int w = windows.size() - 1; w >= 0; w--) {
             if (windows.get(w).tabIndices.isEmpty()) windows.remove(w);
+        }
+        // If no windows remain, create a fallback primary window
+        if (windows.isEmpty()) {
+            ChatWindowInstance primary = new ChatWindowInstance(windowX, windowY, windowWidth, windowHeight);
+            if (!tabs.isEmpty()) primary.tabIndices.add(0);
+            windows.add(primary);
         }
         rebuildMapsAfterDeletion(globalIdx);
         save();
@@ -377,18 +389,18 @@ public class ChatTabData {
     private void rebuildMapsAfterDeletion(int removedIdx) {
         int size = tabs.size() + 1;
         for (int i = removedIdx; i < size - 1; i++) {
-            chatHistories.put(i, chatHistories.get(i + 1));
-            tabFilters.put(i, tabFilters.get(i + 1));
-            tabExclusions.put(i, tabExclusions.get(i + 1));
-            serverMessageFilters.put(i, serverMessageFilters.get(i + 1));
-            includeAllFilters.put(i, includeAllFilters.get(i + 1));
-            includeCommandsFilters.put(i, includeCommandsFilters.get(i + 1));
-            includePlayersFilters.put(i, includePlayersFilters.get(i + 1));
-            includeCommandResponseFilters.put(i, includeCommandResponseFilters.get(i + 1));
-            tabPrefixes.put(i, tabPrefixes.get(i + 1));
-            tabSuffixes.put(i, tabSuffixes.get(i + 1));
-            scrollOffsets.put(i, scrollOffsets.get(i + 1));
-            tabNotifications.put(i, tabNotifications.get(i + 1));
+            chatHistories.put(i, chatHistories.getOrDefault(i + 1, new ArrayList<ChatMessage>()));
+            tabFilters.put(i, tabFilters.getOrDefault(i + 1, ""));
+            tabExclusions.put(i, tabExclusions.getOrDefault(i + 1, ""));
+            serverMessageFilters.put(i, serverMessageFilters.getOrDefault(i + 1, false));
+            includeAllFilters.put(i, includeAllFilters.getOrDefault(i + 1, false));
+            includeCommandsFilters.put(i, includeCommandsFilters.getOrDefault(i + 1, false));
+            includePlayersFilters.put(i, includePlayersFilters.getOrDefault(i + 1, false));
+            includeCommandResponseFilters.put(i, includeCommandResponseFilters.getOrDefault(i + 1, false));
+            tabPrefixes.put(i, tabPrefixes.getOrDefault(i + 1, ""));
+            tabSuffixes.put(i, tabSuffixes.getOrDefault(i + 1, ""));
+            scrollOffsets.put(i, scrollOffsets.getOrDefault(i + 1, 0));
+            tabNotifications.put(i, tabNotifications.getOrDefault(i + 1, false));
         }
         int last = size - 1;
         chatHistories.remove(last); tabFilters.remove(last); tabExclusions.remove(last);
