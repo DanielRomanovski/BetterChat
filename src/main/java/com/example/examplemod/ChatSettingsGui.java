@@ -478,11 +478,11 @@ public class ChatSettingsGui {
         } else {
             filterInput.mouseClicked(mx, my, btn); exclusionInput.mouseClicked(mx, my, btn);
             prefixInput.mouseClicked(mx, my, btn); suffixInput.mouseClicked(mx, my, btn);
-            if (mx >= x + 20 && mx <= x + 200 && my >= y + 95  && my <= y + 105) data.includeAllFilters.put(selectedFilterTab,             !data.includeAllFilters.getOrDefault(selectedFilterTab, false));
-            if (mx >= x + 20 && mx <= x + 200 && my >= y + 110 && my <= y + 120) data.includeCommandsFilters.put(selectedFilterTab,        !data.includeCommandsFilters.getOrDefault(selectedFilterTab, false));
-            if (mx >= x + 20 && mx <= x + 200 && my >= y + 125 && my <= y + 135) data.serverMessageFilters.put(selectedFilterTab,          !data.serverMessageFilters.getOrDefault(selectedFilterTab, false));
-            if (mx >= x + 20 && mx <= x + 200 && my >= y + 140 && my <= y + 150) data.includePlayersFilters.put(selectedFilterTab,         !data.includePlayersFilters.getOrDefault(selectedFilterTab, false));
-            if (mx >= x + 20 && mx <= x + 200 && my >= y + 155 && my <= y + 165) data.includeCommandResponseFilters.put(selectedFilterTab, !data.includeCommandResponseFilters.getOrDefault(selectedFilterTab, false));
+            if (mx >= x + 20 && mx <= x + 200 && my >= y + 95  && my <= y + 105) { data.includeAllFilters.put(selectedFilterTab,             !data.includeAllFilters.getOrDefault(selectedFilterTab, false));             data.filterVersion++; }
+            if (mx >= x + 20 && mx <= x + 200 && my >= y + 110 && my <= y + 120) { data.includeCommandsFilters.put(selectedFilterTab,        !data.includeCommandsFilters.getOrDefault(selectedFilterTab, false));        data.filterVersion++; }
+            if (mx >= x + 20 && mx <= x + 200 && my >= y + 125 && my <= y + 135) { data.serverMessageFilters.put(selectedFilterTab,          !data.serverMessageFilters.getOrDefault(selectedFilterTab, false));          data.filterVersion++; }
+            if (mx >= x + 20 && mx <= x + 200 && my >= y + 140 && my <= y + 150) { data.includePlayersFilters.put(selectedFilterTab,         !data.includePlayersFilters.getOrDefault(selectedFilterTab, false));         data.filterVersion++; }
+            if (mx >= x + 20 && mx <= x + 200 && my >= y + 155 && my <= y + 165) { data.includeCommandResponseFilters.put(selectedFilterTab, !data.includeCommandResponseFilters.getOrDefault(selectedFilterTab, false)); data.filterVersion++; }
             int tx = x + 20;
             for (int i = 0; i < data.tabs.size(); i++) {
                 int tw = Minecraft.getMinecraft().fontRendererObj.getStringWidth("[" + data.tabs.get(i) + "]");
@@ -512,10 +512,14 @@ public class ChatSettingsGui {
             if (exclusionInput.isFocused()) exclusionInput.textboxKeyTyped(c, code);
             if (prefixInput.isFocused())    prefixInput.textboxKeyTyped(c, code);
             if (suffixInput.isFocused())    suffixInput.textboxKeyTyped(c, code);
+            String oldFilter = data.tabFilters.getOrDefault(selectedFilterTab, "");
+            String oldExcl   = data.tabExclusions.getOrDefault(selectedFilterTab, "");
             data.tabFilters.put(selectedFilterTab,    filterInput.getText());
             data.tabExclusions.put(selectedFilterTab, exclusionInput.getText());
             data.tabPrefixes.put(selectedFilterTab,   prefixInput.getText());
             data.tabSuffixes.put(selectedFilterTab,   suffixInput.getText());
+            if (!oldFilter.equals(filterInput.getText()) || !oldExcl.equals(exclusionInput.getText()))
+                data.filterVersion++;
         }
         data.save();
     }

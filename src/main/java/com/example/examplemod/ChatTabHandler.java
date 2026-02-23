@@ -11,6 +11,7 @@ import net.minecraft.util.IChatComponent;
 import net.minecraft.util.EnumChatFormatting;
 import org.lwjgl.opengl.GL11;
 import net.minecraftforge.client.event.ClientChatReceivedEvent;
+import net.minecraftforge.client.event.GuiOpenEvent;
 import net.minecraftforge.client.event.GuiScreenEvent;
 import net.minecraftforge.client.event.RenderGameOverlayEvent;
 import net.minecraftforge.fml.common.eventhandler.EventPriority;
@@ -18,7 +19,6 @@ import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import org.lwjgl.input.Keyboard;
 import org.lwjgl.input.Mouse;
 import java.lang.reflect.Field;
-import java.text.SimpleDateFormat;
 import java.util.*;
 
 public class ChatTabHandler {
@@ -51,12 +51,23 @@ public class ChatTabHandler {
     private boolean tabIsDetached = false;
     // Drop target highlight: window index that the dragged tab is hovering over (-1 = none = will create new)
     private int dropTargetWindowIndex = -1;
+    // In-window reorder: insert position (0 = before first tab, n = after last tab). -1 = not reordering
+    private int tabReorderInsertPos = -1;
 
     // Scroll bar drag (per-window — track window index too)
     private boolean isDraggingScrollBar = false;
     private int scrollBarDragWindowIndex = -1;
     private int scrollBarDragStartY = 0;
     private int scrollBarDragStartOffset = 0;
+
+    // Per-window day-scroll state: min/max scroll offset for the currently visible day,
+    // and the Y positions of the prev/next day nav buttons (for click detection).
+    // Populated each frame by renderScrollBar; read by onMouseClick and the drag handler.
+    private final Map<Integer, Integer> dayScrollMin  = new HashMap<>(); // offset of bottom of current day
+    private final Map<Integer, Integer> dayScrollMax  = new HashMap<>(); // offset of top of current day
+    private final Map<Integer, Integer> dayNavPrevY   = new HashMap<>(); // Y of "prev day" (older) button
+    private final Map<Integer, Integer> dayNavNextY   = new HashMap<>(); // Y of "next day" (newer) button
+    private final Map<Integer, Integer> dayNavBarX    = new HashMap<>(); // X of scroll bar (for hit-test)
 
     // -------------------------------------------------------------------------
     // Hover / click / tooltip (keyed by window index)
@@ -74,6 +85,7 @@ public class ChatTabHandler {
     // Line cache keyed by global tab index
     private final Map<Integer, List<RenderableLine>> lineCache = new HashMap<>();
     private final Map<Integer, Integer> lineCacheHistorySize = new HashMap<>();
+    private final Map<Integer, Integer> lineCacheFilterVersion = new HashMap<>();
     private final Map<Integer, Integer> lineCacheWidth = new HashMap<>();
 
     private HoverEvent lastHoveredEvent = null;
@@ -84,6 +96,10 @@ public class ChatTabHandler {
     private static final long COMMAND_RESPONSE_WINDOW_MS = 3000;
     private long lastPlayerSendTime = 0;
     private static final long SEND_ECHO_DEBOUNCE_MS = 1000;
+
+    // Smooth one-way fade: set to 1.0 on new message, only decreases from there
+    private float hudFade = 0f;
+    private long hudFadeLastFrame = 0L;
 
     // -------------------------------------------------------------------------
     // Screen helpers
@@ -150,41 +166,38 @@ public class ChatTabHandler {
     public void onChatReceived(ClientChatReceivedEvent event) {
         String formatted = event.message.getFormattedText();
         String plain     = event.message.getUnformattedText();
-        String playerName = Minecraft.getMinecraft().thePlayer.getName();
-        String today = new SimpleDateFormat("yyyy/MM/dd").format(new Date());
-        boolean isLocal   = plain.startsWith("<" + playerName + ">") || plain.startsWith(playerName + ":");
+        // Keep playerName in sync so filter matching works
+        data.playerName = Minecraft.getMinecraft().thePlayer.getName();
+        boolean isLocal   = plain.startsWith("<" + data.playerName + ">") || plain.startsWith(data.playerName + ":");
         boolean isOtherPlayer = (plain.startsWith("<") && plain.contains(">")) || (plain.contains(":") && !plain.startsWith("["));
         boolean isCommand = plain.startsWith("/");
         boolean isCommandResponse = !isLocal && !isOtherPlayer && (System.currentTimeMillis() - lastPlayerCommandTime) < COMMAND_RESPONSE_WINDOW_MS;
 
+        // Add to the global log — always, unconditionally
+        ChatTabData.ChatMessage msg = new ChatTabData.ChatMessage(
+            formatted, false, event.message,
+            isLocal, isOtherPlayer, isCommand, isCommandResponse, plain);
+        data.globalLog.add(msg);
+
+        // Invalidate all tab line caches so they re-filter on next draw,
+        // and fire notifications for tabs that match but aren't focused
         for (int i = 0; i < data.tabs.size(); i++) {
-            List<ChatTabData.ChatMessage> history = data.chatHistories.get(i);
-            if (history == null) { history = new ArrayList<>(); data.chatHistories.put(i, history); }
-            if (history.isEmpty() || !history.get(history.size()-1).date.equals(today))
-                history.add(new ChatTabData.ChatMessage(today, true));
-            String ex = data.tabExclusions.getOrDefault(i, "");
-            if (!ex.isEmpty() && Arrays.stream(ex.split(",")).anyMatch(k -> !k.trim().isEmpty() && plain.toLowerCase().contains(k.trim().toLowerCase()))) continue;
-            boolean pass = isLocal || data.includeAllFilters.getOrDefault(i, false) || plain.contains(playerName);
-            if (!pass) {
-                String f = data.tabFilters.getOrDefault(i, "");
-                if (!f.isEmpty() && Arrays.stream(f.split(",")).anyMatch(k -> !k.trim().isEmpty() && plain.toLowerCase().contains(k.trim().toLowerCase()))) pass = true;
-                if (data.includeCommandsFilters.getOrDefault(i, false) && isCommand) pass = true;
-                if (data.serverMessageFilters.getOrDefault(i, false) && !isOtherPlayer) pass = true;
-                if (data.includePlayersFilters.getOrDefault(i, false) && isOtherPlayer) pass = true;
-                if (data.includeCommandResponseFilters.getOrDefault(i, false) && isCommandResponse) pass = true;
-            }
-            if (pass) {
-                history.add(new ChatTabData.ChatMessage(formatted, false, event.message));
-                // Notify windows that aren't showing this tab as selected
+            if (data.messagePassesFilter(i, msg)) {
+                lineCache.remove(i);
+                lineCacheHistorySize.put(i, -1);
                 for (ChatTabData.ChatWindowInstance win : data.windows) {
                     if (!isLocal && win.getSelectedGlobalIndex() != i && win.tabIndices.contains(i))
                         data.tabNotifications.put(i, true);
                 }
-                lineCacheHistorySize.put(i, -1);
             }
         }
+
         long now = System.currentTimeMillis();
-        if (now - lastPlayerSendTime > SEND_ECHO_DEBOUNCE_MS) data.lastMessageTime = now;
+        if (now - lastPlayerSendTime > SEND_ECHO_DEBOUNCE_MS) {
+            data.lastMessageTime = now;
+            hudFade = 1.0f;
+            hudFadeLastFrame = now;
+        }
         data.save();
     }
 
@@ -199,18 +212,35 @@ public class ChatTabHandler {
         if (data.hideDefaultChat) event.setCanceled(true);
     }
 
+    // Fired whenever any GUI is opened (including null = GUI closed).
+    // We use this to reset scroll to bottom whenever GuiChat is closed.
+    @SubscribeEvent
+    public void onGuiOpen(GuiOpenEvent event) {
+        if (wasChatOpen && !(event.gui instanceof GuiChat)) {
+            // Chat was open and is now closing — jump every tab back to the bottom
+            for (int i = 0; i < data.tabs.size(); i++) data.scrollOffsets.put(i, 0);
+            targetCacheScrollOffset.replaceAll((k, v) -> Integer.MIN_VALUE);
+            wasChatOpen = false;
+        }
+        if (event.gui instanceof GuiChat) {
+            wasChatOpen = true;
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Main draw loop
     // -------------------------------------------------------------------------
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public void onDraw(GuiScreenEvent.DrawScreenEvent.Post event) {
-        if (!(event.gui instanceof GuiChat)) { customChatField = null; wasChatOpen = false; return; }
+        if (!(event.gui instanceof GuiChat)) { customChatField = null; return; }
         wasChatOpen = true;
 
         Minecraft mc = Minecraft.getMinecraft();
         ScaledResolution sr = new ScaledResolution(mc);
-        int mx = Mouse.getEventX() * event.gui.width / mc.displayWidth;
-        int my = event.gui.height - Mouse.getEventY() * event.gui.height / mc.displayHeight - 1;
+        // Use Mouse.getX()/getY() (real-time position) instead of Mouse.getEventX()/getEventY()
+        // (event-based values only update when a mouse event is polled, causing choppy drag/hover at ~5-10fps)
+        int mx = Mouse.getX() * event.gui.width / mc.displayWidth;
+        int my = event.gui.height - Mouse.getY() * event.gui.height / mc.displayHeight - 1;
 
         if (isSettingsOpen) { settings.draw(mx, my); return; }
 
@@ -243,16 +273,16 @@ public class ChatTabHandler {
                 if (globalIdx != -1) {
                     List<RenderableLine> lines = lineCache.get(globalIdx);
                     if (lines != null) {
-                        int totalLines = lines.size(), maxLines = (win.height - 30) / 10;
-                        int barAreaH = win.height - 35;
-                        int thumbH = Math.max(10, (int)(barAreaH * ((double)maxLines / totalLines)));
-                        int scrollRange = totalLines - maxLines, thumbRange = barAreaH - thumbH;
-                        if (thumbRange > 0 && scrollRange > 0) {
-                            int newOffset = scrollBarDragStartOffset - (int)((my - scrollBarDragStartY) * ((double)scrollRange / thumbRange));
-                            newOffset = Math.max(0, Math.min(scrollRange, newOffset));
-                            data.scrollOffsets.put(globalIdx, newOffset);
-                            targetCacheScrollOffset.put(scrollBarDragWindowIndex, Integer.MIN_VALUE);
-                        }
+                        int winIdx2 = scrollBarDragWindowIndex;
+                        int minOff = dayScrollMin.getOrDefault(winIdx2, 0);
+                        int maxOff = dayScrollMax.getOrDefault(winIdx2, Math.max(0, lines.size() - (win.height - 30) / 10));
+                        int barAreaY = win.y + 25, barAreaH = win.height - 35;
+                        // Map mouse Y across the track: top = maxOff (oldest in day), bottom = minOff (newest in day)
+                        double fraction = 1.0 - Math.max(0.0, Math.min(1.0, (double)(my - barAreaY) / barAreaH));
+                        int newOffset = minOff + (int)(fraction * (maxOff - minOff));
+                        newOffset = Math.max(minOff, Math.min(maxOff, newOffset));
+                        data.scrollOffsets.put(globalIdx, newOffset);
+                        targetCacheScrollOffset.put(winIdx2, Integer.MIN_VALUE);
                     }
                 }
             } else if (isDraggingTab) {
@@ -278,6 +308,22 @@ public class ChatTabHandler {
                     }
                 } else {
                     tabIsDetached = true;
+                }
+                // Compute in-window reorder insert position when not detached
+                if (!tabIsDetached && draggingTabSourceWindow != null && data.windows.contains(draggingTabSourceWindow)) {
+                    ChatTabData.ChatWindowInstance src = draggingTabSourceWindow;
+                    int cx = src.x + 5;
+                    tabReorderInsertPos = 0;
+                    for (int li = 0; li < src.tabIndices.size(); li++) {
+                        int gIdx = src.tabIndices.get(li);
+                        if (gIdx >= data.tabs.size()) continue;
+                        int tabW = Minecraft.getMinecraft().fontRendererObj.getStringWidth(data.tabs.get(gIdx)) + 18 + 4;
+                        int tabMid = cx + tabW / 2;
+                        if (mx > tabMid) tabReorderInsertPos = li + 1;
+                        cx += tabW;
+                    }
+                } else {
+                    tabReorderInsertPos = -1;
                 }
             }
         }
@@ -342,13 +388,17 @@ public class ChatTabHandler {
         // Tabs
         int selectionHex = data.getHex(data.colorSelection, 255);
         int curX = win.x + 5;
+        // Collect tab X positions for the reorder indicator
+        List<Integer> tabStartXList = new ArrayList<>();
         for (int li = 0; li < win.tabIndices.size(); li++) {
             int globalIdx = win.tabIndices.get(li);
             if (globalIdx >= data.tabs.size()) continue;
             // Skip drawing if this is the tab being dragged and it's detached
             if (isDraggingTab && draggingTabGlobalIndex == globalIdx && tabIsDetached) {
+                tabStartXList.add(curX);
                 curX += mc.fontRendererObj.getStringWidth(data.tabs.get(globalIdx)) + 22; continue;
             }
+            tabStartXList.add(curX);
             int tw = mc.fontRendererObj.getStringWidth(
                     (editingTabGlobalIndex == globalIdx && renameField != null) ? renameField.getText() : data.tabs.get(globalIdx));
             int tabW = tw + 18;
@@ -366,6 +416,17 @@ public class ChatTabHandler {
                 mc.fontRendererObj.drawString(data.tabs.get(globalIdx), curX + 9, win.y + 7, (pendingDeleteGlobalIndex == globalIdx) ? 0xFFFF5555 : 0xFFFFFF);
             }
             curX += tabW + 4;
+        }
+
+        // Draw reorder insert-position indicator (vertical bar between tabs)
+        if (isDraggingTab && !tabIsDetached && draggingTabSourceWindow == win && tabReorderInsertPos != -1) {
+            int insertX;
+            if (tabReorderInsertPos < tabStartXList.size()) {
+                insertX = tabStartXList.get(tabReorderInsertPos) - 2;
+            } else {
+                insertX = curX - 2; // after the last tab
+            }
+            Gui.drawRect(insertX, win.y + 2, insertX + 2, win.y + 20, 0xFFFFFFFF);
         }
 
         // [+] button
@@ -391,7 +452,22 @@ public class ChatTabHandler {
         }
 
         if (!tabIsDetached) {
-            // Dropped back in source window — nothing to do (it was never removed)
+            // Dropped back in source window — reorder if insert position changed
+            ChatTabData.ChatWindowInstance srcWin = draggingTabSourceWindow;
+            if (srcWin != null && data.windows.contains(srcWin) && tabReorderInsertPos != -1) {
+                int currentLocalIdx = srcWin.tabIndices.indexOf(draggingTabGlobalIndex);
+                if (currentLocalIdx != -1) {
+                    // Adjust insert pos for the removal of the tab itself
+                    int insertPos = tabReorderInsertPos;
+                    if (insertPos > currentLocalIdx) insertPos--;
+                    if (insertPos != currentLocalIdx) {
+                        srcWin.tabIndices.remove(currentLocalIdx);
+                        srcWin.tabIndices.add(insertPos, draggingTabGlobalIndex);
+                        // Keep selectedLocalTab pointing at the moved tab
+                        srcWin.selectedLocalTab = insertPos;
+                    }
+                }
+            }
         } else if (dropTargetWindowIndex != -1 && dropTargetWindowIndex < data.windows.size()) {
             // Merge into target window
             data.mergeTabIntoWindow(draggingTabGlobalIndex, dropTargetWindowIndex);
@@ -407,6 +483,7 @@ public class ChatTabHandler {
         draggingTabSourceWindow = null;
         dropTargetWindowIndex = -1;
         tabIsDetached = false;
+        tabReorderInsertPos = -1;
         data.save();
     }
 
@@ -416,17 +493,21 @@ public class ChatTabHandler {
     private void renderWindowContent(Minecraft mc, ChatTabData.ChatWindowInstance win, int globalAlpha, boolean isHUD) {
         int globalIdx = win.getSelectedGlobalIndex();
         if (globalIdx == -1) return;
-        List<ChatTabData.ChatMessage> history = data.chatHistories.get(globalIdx);
-        if (history == null || history.isEmpty()) return;
 
         int wrapWidth = win.width - 15;
         int winIdx = data.windows.indexOf(win);
 
-        // Line cache
-        int cachedSize = lineCacheHistorySize.getOrDefault(globalIdx, -1);
-        boolean stale = !lineCacheWidth.containsKey(globalIdx) || lineCacheWidth.get(globalIdx) != wrapWidth
-                || cachedSize != history.size() || !lineCache.containsKey(globalIdx);
+        // The cache is stale if the global log has grown, the width changed, filters changed, or it was explicitly invalidated
+        int cachedGlobalSize = lineCacheHistorySize.getOrDefault(globalIdx, -1);
+        int cachedFilterVer  = lineCacheFilterVersion.getOrDefault(globalIdx, -1);
+        boolean stale = !lineCacheWidth.containsKey(globalIdx)
+                || lineCacheWidth.get(globalIdx) != wrapWidth
+                || cachedGlobalSize != data.globalLog.size()
+                || cachedFilterVer  != data.filterVersion
+                || !lineCache.containsKey(globalIdx);
         if (stale) {
+            // Rebuild by filtering the global log through this tab's settings
+            List<ChatTabData.ChatMessage> history = data.buildFilteredHistory(globalIdx);
             List<RenderableLine> built = new ArrayList<>();
             for (ChatTabData.ChatMessage msg : history) {
                 if (msg.isDateSeparator) built.add(new RenderableLine(msg.text, true, msg.time, msg.date, msg, 0));
@@ -440,13 +521,15 @@ public class ChatTabHandler {
                 }
             }
             lineCache.put(globalIdx, built);
-            lineCacheHistorySize.put(globalIdx, history.size());
+            lineCacheHistorySize.put(globalIdx, data.globalLog.size());
+            lineCacheFilterVersion.put(globalIdx, data.filterVersion);
             lineCacheWidth.put(globalIdx, wrapWidth);
             hoverTargetCache.remove(winIdx); clickTargetCache.remove(winIdx);
             targetCacheScrollOffset.put(winIdx, Integer.MIN_VALUE);
         }
 
         List<RenderableLine> allLines = lineCache.get(globalIdx);
+        if (allLines == null || allLines.isEmpty()) return;
         int maxLines   = (win.height - 30) / 10;
         int totalLines = allLines.size();
         int currentOffset = data.scrollOffsets.getOrDefault(globalIdx, 0);
@@ -523,11 +606,147 @@ public class ChatTabHandler {
     }
 
     private void renderScrollBar(ChatTabData.ChatWindowInstance win, int total, int visible, int offset, int color) {
-        int barX      = win.x + win.width - 4;
-        int barAreaY  = win.y + 25;
-        int barAreaH  = win.height - 35;
-        int thumbH    = Math.max(10, (int)(barAreaH * ((double)visible / total)));
-        int thumbY    = barAreaY + (barAreaH - thumbH) - (int)((barAreaH - thumbH) * ((double)offset / (total - visible)));
+        int globalIdx = win.getSelectedGlobalIndex();
+        List<RenderableLine> allLines = (globalIdx != -1) ? lineCache.get(globalIdx) : null;
+        if (allLines == null || allLines.isEmpty()) return;
+
+        int winIdx   = data.windows.indexOf(win);
+        int barX     = win.x + win.width - 4;
+        int barAreaY = win.y + 25;
+        int barAreaH = win.height - 35;
+        if (barAreaH <= 0) return;
+
+        // ── Build date segments ──────────────────────────────────────────────
+        // Each segment: [firstLineIdx, lastLineIdx_inclusive, contentLineCount]
+        // Lines are stored bottom-to-top in the scroll system (offset 0 = bottom).
+        // allLines is ordered top-to-bottom (index 0 = oldest).
+        List<int[]> segs = new ArrayList<>(); // [firstIdx, lastIdx, count]
+        int si = -1;
+        for (int i = 0; i < allLines.size(); i++) {
+            if (allLines.get(i).isSeparator) {
+                si = i; // separator starts a new day
+            } else {
+                if (si >= 0) {
+                    // new segment starting at this separator
+                    segs.add(new int[]{si, i, 0});
+                    si = -1;
+                } else if (segs.isEmpty()) {
+                    // messages before any separator (no date header yet)
+                    segs.add(new int[]{0, i, 0});
+                }
+                // extend last segment's last line
+                segs.get(segs.size() - 1)[1] = i;
+                segs.get(segs.size() - 1)[2]++;
+            }
+        }
+
+        if (segs.isEmpty()) {
+            // Fallback: no segments, plain scroll bar
+            Gui.drawRect(barX, barAreaY, barX + 2, barAreaY + barAreaH, 0x22FFFFFF);
+            int thumbH = Math.max(10, (int)(barAreaH * ((double)visible / total)));
+            // offset=0 → thumb at bottom; offset=max → thumb at top
+            int thumbY = barAreaY + (barAreaH - thumbH) - (int)((barAreaH - thumbH) * ((double)offset / Math.max(1, total - visible)));
+            Gui.drawRect(barX, thumbY, barX + 2, thumbY + thumbH, color);
+            dayScrollMin.put(winIdx, 0); dayScrollMax.put(winIdx, Math.max(0, total - visible));
+            dayNavPrevY.put(winIdx, -1); dayNavNextY.put(winIdx, -1); dayNavBarX.put(winIdx, barX);
+            return;
+        }
+
+        // ── Find which segment the current viewport bottom is in ─────────────
+        // "offset" = how many lines from the bottom are scrolled off.
+        // The bottom-most visible line index (in allLines, 0=oldest) = total - 1 - offset
+        int bottomIdx = total - 1 - offset;
+        if (bottomIdx < 0) bottomIdx = 0;
+
+        int curSegIdx = segs.size() - 1;
+        for (int s = 0; s < segs.size(); s++) {
+            if (bottomIdx <= segs.get(s)[1]) { curSegIdx = s; break; }
+        }
+        int[] cur = segs.get(curSegIdx);
+        int dayFirst = cur[0]; // index of separator (or first line) of this day
+        int dayLast  = cur[1]; // index of last content line of this day
+        int dayCount = cur[2]; // number of content lines in this day
+
+        // ── Compute offset range for this day ────────────────────────────────
+        // offset = total - 1 - bottomIdx
+        // When at the very bottom of this day: bottomIdx = dayLast  → offset = total - 1 - dayLast
+        // When at the very top    of this day: bottomIdx = dayFirst → offset = total - 1 - dayFirst
+        //   (but clamped so we don't scroll off screen)
+        int offsetAtDayBottom = Math.max(0, total - 1 - dayLast);
+        int offsetAtDayTop    = Math.min(total - visible, total - 1 - dayFirst);
+        if (offsetAtDayTop < offsetAtDayBottom) offsetAtDayTop = offsetAtDayBottom;
+
+        // Store for drag/click handler
+        dayScrollMin.put(winIdx, offsetAtDayBottom);
+        dayScrollMax.put(winIdx, offsetAtDayTop);
+        dayNavBarX.put(winIdx, barX);
+
+        // ── Nav button layout ────────────────────────────────────────────────
+        // Reserve 10px at top for "▲ older" button if there's a previous day,
+        // and 10px at bottom for "▼ newer" button if there's a next day.
+        boolean hasPrev = curSegIdx > 0;
+        boolean hasNext = curSegIdx < segs.size() - 1;
+
+        int trackTop    = barAreaY + (hasPrev ? 11 : 0);
+        int trackBottom = barAreaY + barAreaH - (hasNext ? 11 : 0);
+        int trackH      = trackBottom - trackTop;
+        if (trackH <= 0) trackH = 1;
+
+        // Draw track
+        Gui.drawRect(barX, trackTop, barX + 2, trackBottom, 0x22FFFFFF);
+
+        // Prev (older) button — above the track
+        if (hasPrev) {
+            int btnY = barAreaY;
+            Minecraft mc = Minecraft.getMinecraft();
+            mc.fontRendererObj.drawString("\u25B2", barX - 1, btnY, 0xAAFFFFFF);
+            // Only show the previous day's date label when we are NOT on the current/today's day
+            // (i.e. there is a newer day after us, meaning we are not already on today)
+            boolean onToday = !hasNext; // last segment = newest = today
+            if (!onToday) {
+                int[] prevSeg = segs.get(curSegIdx - 1);
+                String prevDate = allLines.get(prevSeg[0]).isSeparator ? allLines.get(prevSeg[0]).text : "";
+                if (!prevDate.isEmpty()) {
+                    String label = prevDate.length() > 5 ? prevDate.substring(5) : prevDate; // MM/DD
+                    mc.fontRendererObj.drawString(label, barX - mc.fontRendererObj.getStringWidth(label) - 3, btnY, 0x77FFFFFF);
+                }
+            }
+            dayNavPrevY.put(winIdx, btnY);
+        } else {
+            dayNavPrevY.put(winIdx, -1);
+        }
+
+        // Next (newer) button — below the track
+        if (hasNext) {
+            int btnY = trackBottom + 1;
+            Minecraft mc = Minecraft.getMinecraft();
+            mc.fontRendererObj.drawString("\u25BC", barX - 1, btnY, 0xAAFFFFFF);
+            int[] nextSeg = segs.get(curSegIdx + 1);
+            String nextDate = allLines.get(nextSeg[0]).isSeparator ? allLines.get(nextSeg[0]).text : "";
+            if (!nextDate.isEmpty()) {
+                String label = nextDate.length() > 5 ? nextDate.substring(5) : nextDate;
+                mc.fontRendererObj.drawString(label, barX - mc.fontRendererObj.getStringWidth(label) - 3, btnY, 0x77FFFFFF);
+            }
+            dayNavNextY.put(winIdx, btnY);
+        } else {
+            dayNavNextY.put(winIdx, -1);
+        }
+
+        // ── Thumb: sized to this day only ────────────────────────────────────
+        int scrollRangeInDay = Math.max(1, offsetAtDayTop - offsetAtDayBottom);
+        // dayFraction: 0.0 = at bottom of day (newest, offset = offsetAtDayBottom)
+        //              1.0 = at top of day (oldest, offset = offsetAtDayTop)
+        double dayFraction = (offsetAtDayTop == offsetAtDayBottom) ? 0.0
+                : (double)(offset - offsetAtDayBottom) / scrollRangeInDay;
+        dayFraction = Math.max(0, Math.min(1, dayFraction));
+
+        // Thumb height = trackH * visible / dayCount
+        int thumbH = Math.max(8, (int)(trackH * ((double)visible / Math.max(1, dayCount))));
+        thumbH = Math.min(thumbH, trackH);
+        // thumbY: fraction=0 (bottom/newest) → thumb at BOTTOM of track
+        //         fraction=1 (top/oldest)    → thumb at TOP of track
+        int thumbY = trackTop + (int)((1.0 - dayFraction) * (trackH - thumbH));
+
         Gui.drawRect(barX, thumbY, barX + 2, thumbY + thumbH, color);
     }
 
@@ -554,20 +773,45 @@ public class ChatTabHandler {
             if (!data.isLocked && btn == 0 && mx >= win.x + win.width - 10 && mx <= win.x + win.width && my >= win.y + win.height - 10 && my <= win.y + win.height) {
                 resizingWindowIndex = w; event.setCanceled(true); return;
             }
-            // Scroll bar
+            // Scroll bar + day nav buttons
             if (btn == 0) {
                 int globalIdx = win.getSelectedGlobalIndex();
                 if (globalIdx != -1) {
                     List<RenderableLine> lines = lineCache.get(globalIdx);
                     if (lines != null && lines.size() > (win.height - 30) / 10) {
-                        int totalLines = lines.size(), maxLines = (win.height - 30) / 10;
-                        int barX = win.x + win.width - 4, barAreaY = win.y + 25, barAreaH = win.height - 35;
-                        int curOff = data.scrollOffsets.getOrDefault(globalIdx, 0);
-                        int thumbH = Math.max(10, (int)(barAreaH * ((double)maxLines / totalLines)));
-                        int thumbY = barAreaY + (barAreaH - thumbH) - (int)((barAreaH - thumbH) * ((double)curOff / (totalLines - maxLines)));
-                        if (mx >= barX - 2 && mx <= barX + 4 && my >= thumbY && my <= thumbY + thumbH) {
+                        int barX = dayNavBarX.getOrDefault(w, win.x + win.width - 4);
+                        int barAreaY = win.y + 25, barAreaH = win.height - 35;
+                        int prevBtnY = dayNavPrevY.getOrDefault(w, -1);
+                        int nextBtnY = dayNavNextY.getOrDefault(w, -1);
+
+                        // ▲ Prev (older) day button
+                        if (prevBtnY != -1 && mx >= barX - 8 && mx <= barX + 8 && my >= prevBtnY && my <= prevBtnY + 9) {
+                            // Jump to the bottom of the previous (older) day
+                            int newOff = dayScrollMin.getOrDefault(w, 0);
+                            // "bottom of previous day" = just above our current day's bottom
+                            // = offsetAtDayBottom of cur day + 1 line (to land at last line of prev day)
+                            // Actually: we want to navigate into the prev day, so set offset to
+                            // one line above the current day's bottom limit.
+                            newOff = newOff + 1;
+                            newOff = Math.max(0, Math.min(Math.max(0, lines.size() - (win.height - 30) / 10), newOff));
+                            data.scrollOffsets.put(globalIdx, newOff);
+                            targetCacheScrollOffset.put(w, Integer.MIN_VALUE);
+                            event.setCanceled(true); return;
+                        }
+                        // ▼ Next (newer) day button
+                        if (nextBtnY != -1 && mx >= barX - 8 && mx <= barX + 8 && my >= nextBtnY && my <= nextBtnY + 9) {
+                            // Jump to the top of the next (newer) day
+                            int newOff = dayScrollMax.getOrDefault(w, 0);
+                            newOff = newOff - 1;
+                            newOff = Math.max(0, Math.min(Math.max(0, lines.size() - (win.height - 30) / 10), newOff));
+                            data.scrollOffsets.put(globalIdx, newOff);
+                            targetCacheScrollOffset.put(w, Integer.MIN_VALUE);
+                            event.setCanceled(true); return;
+                        }
+                        // Track drag
+                        if (mx >= barX - 2 && mx <= barX + 4 && my >= barAreaY && my <= barAreaY + barAreaH) {
                             isDraggingScrollBar = true; scrollBarDragWindowIndex = w;
-                            scrollBarDragStartY = my; scrollBarDragStartOffset = curOff;
+                            scrollBarDragStartY = my; scrollBarDragStartOffset = data.scrollOffsets.getOrDefault(globalIdx, 0);
                             event.setCanceled(true); return;
                         }
                     }

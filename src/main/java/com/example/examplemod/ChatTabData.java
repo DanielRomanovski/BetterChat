@@ -8,7 +8,13 @@ import java.util.*;
 
 public class ChatTabData {
     public final List<String> tabs = new ArrayList<>();
-    public Map<Integer, List<ChatMessage>> chatHistories = new HashMap<>();
+
+    // -------------------------------------------------------------------------
+    // Global raw log — every message ever received, never deleted
+    // -------------------------------------------------------------------------
+    public List<ChatMessage> globalLog = new ArrayList<>();
+
+    // Per-tab settings (keyed by tab index)
     public final Map<Integer, String> tabFilters = new HashMap<>();
     public final Map<Integer, String> tabExclusions = new HashMap<>();
     public final Map<Integer, Boolean> serverMessageFilters = new HashMap<>();
@@ -20,6 +26,12 @@ public class ChatTabData {
     public final Map<Integer, String> tabSuffixes = new HashMap<>();
     public final Map<Integer, Integer> scrollOffsets = new HashMap<>();
     public final Map<Integer, Boolean> tabNotifications = new HashMap<>();
+
+    /** Incremented whenever any filter setting changes — used to invalidate rendered line caches. */
+    public int filterVersion = 0;
+
+    /** The player name at last login — used for filter matching in the global log. */
+    public String playerName = "";
 
     public long lastMessageTime = 0;
 
@@ -42,11 +54,10 @@ public class ChatTabData {
     // -------------------------------------------------------------------------
     // Multi-window support
     // -------------------------------------------------------------------------
-    /** One chat window on screen. Owns a list of tab indices (into the global tabs list). */
     public static class ChatWindowInstance {
         public int x, y, width, height;
-        public List<Integer> tabIndices = new ArrayList<>(); // which global tab indices this window shows
-        public int selectedLocalTab = 0; // index into tabIndices
+        public List<Integer> tabIndices = new ArrayList<>();
+        public int selectedLocalTab = 0;
 
         public ChatWindowInstance(int x, int y, int w, int h) {
             this.x = x; this.y = y; this.width = w; this.height = h;
@@ -64,27 +75,38 @@ public class ChatTabData {
         }
     }
 
-    /** All open windows. windows.get(0) is always the primary window. */
     public final List<ChatWindowInstance> windows = new ArrayList<>();
-
-    // -------------------------------------------------------------------------
 
     private final File configFile;
     private final File logFile;
 
     public static class ChatMessage implements Serializable {
-        private static final long serialVersionUID = 1L;
+        private static final long serialVersionUID = 2L;
         public String text, time, date;
         public boolean isDateSeparator;
         public transient IChatComponent rawComponent;
+        // Raw classification fields stored so we can re-filter without re-parsing
+        public boolean isLocal;
+        public boolean isOtherPlayer;
+        public boolean isCommand;
+        public boolean isCommandResponse;
+        public String plainText; // unformatted, for filter matching
 
         public ChatMessage(String text, boolean isSeparator) {
             this.text = text; this.isDateSeparator = isSeparator;
             this.time = new SimpleDateFormat("HH:mm").format(new Date());
             this.date = new SimpleDateFormat("yyyy/MM/dd").format(new Date());
         }
-        public ChatMessage(String text, boolean isSeparator, IChatComponent component) {
-            this(text, isSeparator); this.rawComponent = component;
+        public ChatMessage(String text, boolean isSeparator, IChatComponent component,
+                           boolean isLocal, boolean isOtherPlayer, boolean isCommand,
+                           boolean isCommandResponse, String plainText) {
+            this(text, isSeparator);
+            this.rawComponent = component;
+            this.isLocal = isLocal;
+            this.isOtherPlayer = isOtherPlayer;
+            this.isCommand = isCommand;
+            this.isCommandResponse = isCommandResponse;
+            this.plainText = plainText;
         }
     }
 
@@ -102,10 +124,61 @@ public class ChatTabData {
     }
 
     // -------------------------------------------------------------------------
+    // Filter matching — test a single raw message against a tab's settings
+    // -------------------------------------------------------------------------
+    public boolean messagePassesFilter(int tabIdx, ChatMessage msg) {
+        if (msg.isDateSeparator) return false; // separators are injected by the renderer
+        String plain = msg.plainText != null ? msg.plainText : msg.text;
+
+        // Exclusion check
+        String ex = tabExclusions.getOrDefault(tabIdx, "");
+        if (!ex.isEmpty()) {
+            for (String k : ex.split(",")) {
+                if (!k.trim().isEmpty() && plain.toLowerCase().contains(k.trim().toLowerCase())) return false;
+            }
+        }
+
+        // Inclusion checks
+        if (msg.isLocal) return true;
+        if (includeAllFilters.getOrDefault(tabIdx, false)) return true;
+        if (!playerName.isEmpty() && plain.contains(playerName)) return true;
+
+        String f = tabFilters.getOrDefault(tabIdx, "");
+        if (!f.isEmpty()) {
+            for (String k : f.split(",")) {
+                if (!k.trim().isEmpty() && plain.toLowerCase().contains(k.trim().toLowerCase())) return true;
+            }
+        }
+        if (includeCommandsFilters.getOrDefault(tabIdx, false) && msg.isCommand) return true;
+        if (serverMessageFilters.getOrDefault(tabIdx, false) && !msg.isOtherPlayer) return true;
+        if (includePlayersFilters.getOrDefault(tabIdx, false) && msg.isOtherPlayer) return true;
+        if (includeCommandResponseFilters.getOrDefault(tabIdx, false) && msg.isCommandResponse) return true;
+
+        return false;
+    }
+
+    /**
+     * Build a filtered + date-separated list of messages for a tab by scanning globalLog.
+     * This is called by the renderer's line cache when it needs to rebuild.
+     */
+    public List<ChatMessage> buildFilteredHistory(int tabIdx) {
+        List<ChatMessage> result = new ArrayList<>();
+        String lastDate = null;
+        for (ChatMessage msg : globalLog) {
+            if (!messagePassesFilter(tabIdx, msg)) continue;
+            // Insert a date separator when the date changes
+            if (!msg.date.equals(lastDate)) {
+                result.add(new ChatMessage(msg.date, true));
+                lastDate = msg.date;
+            }
+            result.add(msg);
+        }
+        return result;
+    }
+
+    // -------------------------------------------------------------------------
     // Window helpers
     // -------------------------------------------------------------------------
-
-    /** Find which window owns a given global tab index. Returns -1 if none. */
     public int windowIndexForTab(int globalTabIdx) {
         for (int w = 0; w < windows.size(); w++) {
             if (windows.get(w).tabIndices.contains(globalTabIdx)) return w;
@@ -113,22 +186,14 @@ public class ChatTabData {
         return -1;
     }
 
-    /**
-     * Move a tab from its current window to a new standalone window.
-     * The new window is positioned at (spawnX, spawnY).
-     * If the source window becomes empty, remove it (unless it is window 0).
-     */
     public ChatWindowInstance detachTab(int globalTabIdx, int spawnX, int spawnY) {
-        // Remove from current window
         for (ChatWindowInstance win : windows) {
             win.tabIndices.remove((Integer) globalTabIdx);
             if (win.selectedLocalTab >= win.tabIndices.size()) win.selectedLocalTab = Math.max(0, win.tabIndices.size() - 1);
         }
-        // Remove ALL empty windows (including window 0)
         for (int w = windows.size() - 1; w >= 0; w--) {
             if (windows.get(w).tabIndices.isEmpty()) windows.remove(w);
         }
-        // Create new window for this tab
         ChatWindowInstance newWin = new ChatWindowInstance(spawnX, spawnY, windowWidth, windowHeight);
         newWin.tabIndices.add(globalTabIdx);
         newWin.selectedLocalTab = 0;
@@ -137,29 +202,21 @@ public class ChatTabData {
         return newWin;
     }
 
-    /**
-     * Move a tab from its current window into an existing target window.
-     * If the source window becomes empty and is not window 0, remove it.
-     */
     public void mergeTabIntoWindow(int globalTabIdx, int targetWindowIdx) {
         ChatWindowInstance target = windows.get(targetWindowIdx);
-        if (target.tabIndices.contains(globalTabIdx)) return; // already there
-        // Remove from source
+        if (target.tabIndices.contains(globalTabIdx)) return;
         for (ChatWindowInstance win : windows) {
             win.tabIndices.remove((Integer) globalTabIdx);
             if (win.selectedLocalTab >= win.tabIndices.size()) win.selectedLocalTab = Math.max(0, win.tabIndices.size() - 1);
         }
-        // Remove ALL empty windows (including window 0)
         for (int w = windows.size() - 1; w >= 0; w--) {
             if (windows.get(w).tabIndices.isEmpty()) windows.remove(w);
         }
-        // Re-find target after potential removal
         int newTargetIdx = windows.indexOf(target);
         if (newTargetIdx == -1) newTargetIdx = 0;
         if (newTargetIdx < windows.size()) {
             windows.get(newTargetIdx).tabIndices.add(globalTabIdx);
         } else {
-            // Target was removed (was empty), just add to first available window
             if (!windows.isEmpty()) windows.get(0).tabIndices.add(globalTabIdx);
         }
         save();
@@ -220,20 +277,19 @@ public class ChatTabData {
                 String suf = tabSuffixes.getOrDefault(i, "");
                 writer.println("TAB_V6:" + tabs.get(i) + "|" + filter + "|" + exclusion + "|" + serverMsgs + "|" + incAll + "|" + incCmd + "|" + pre + "|" + suf + "|" + incPlayers + "|" + incCmdResp);
             }
-            if (saveChatLog) saveHistory();
+            saveHistory();
         } catch (IOException e) { e.printStackTrace(); }
     }
 
     private void saveHistory() {
         try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(logFile))) {
-            oos.writeObject(chatHistories);
+            oos.writeObject(globalLog);
         } catch (IOException e) { e.printStackTrace(); }
     }
 
     @SuppressWarnings("unchecked")
     public void load() {
         tabs.clear(); windows.clear();
-        // Temporary storage for window lines read before tabs are loaded
         List<String[]> pendingWindows = new ArrayList<>();
         String[] primaryWindowRaw = null;
 
@@ -291,18 +347,13 @@ public class ChatTabData {
                         if (parts.length > 8) includePlayersFilters.put(idx, Boolean.parseBoolean(parts[8]));
                         if (parts.length > 9) includeCommandResponseFilters.put(idx, Boolean.parseBoolean(parts[9]));
                     }
-                    // ...legacy format support omitted for brevity, kept from original...
                 }
             } catch (Exception e) { e.printStackTrace(); }
         }
 
         if (tabs.isEmpty()) tabs.add("Global");
-        for (int i = 0; i < tabs.size(); i++) {
-            if (!chatHistories.containsKey(i)) chatHistories.put(i, new ArrayList<ChatMessage>());
-            scrollOffsets.put(i, 0);
-        }
+        for (int i = 0; i < tabs.size(); i++) scrollOffsets.put(i, 0);
 
-        // Build primary window (window 0)
         ChatWindowInstance primary = new ChatWindowInstance(windowX, windowY, windowWidth, windowHeight);
         if (primaryWindowRaw != null) {
             try { primary.selectedLocalTab = Integer.parseInt(primaryWindowRaw[0]); } catch (Exception ignored) {}
@@ -312,11 +363,9 @@ public class ChatTabData {
                 }
             }
         }
-        // Default: all tabs in primary window if no saved assignment
         if (primary.tabIndices.isEmpty()) for (int i = 0; i < tabs.size(); i++) primary.tabIndices.add(i);
         windows.add(primary);
 
-        // Build extra windows
         for (String[] parts : pendingWindows) {
             try {
                 int wx = Integer.parseInt(parts[0]), wy = Integer.parseInt(parts[1]);
@@ -329,7 +378,6 @@ public class ChatTabData {
                         int tabIdx = Integer.parseInt(parts[i].substring(1));
                         if (tabIdx < tabs.size()) {
                             win.tabIndices.add(tabIdx);
-                            // Remove from primary if it was put there by default
                             primary.tabIndices.remove((Integer) tabIdx);
                         }
                     }
@@ -338,25 +386,40 @@ public class ChatTabData {
             } catch (Exception e) { e.printStackTrace(); }
         }
 
-        if (saveChatLog && logFile.exists()) {
+        // Load global log
+        if (logFile.exists()) {
             try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(logFile))) {
                 Object obj = ois.readObject();
-                if (obj instanceof Map) this.chatHistories = (Map<Integer, List<ChatMessage>>) obj;
+                if (obj instanceof List) {
+                    globalLog = (List<ChatMessage>) obj;
+                } else if (obj instanceof Map) {
+                    // Migrate old per-tab format: flatten all messages into globalLog in order
+                    Map<Integer, List<ChatMessage>> oldHistories = (Map<Integer, List<ChatMessage>>) obj;
+                    // Use tab 0 (Global) as the source of truth for migration
+                    List<ChatMessage> tab0 = oldHistories.get(0);
+                    if (tab0 != null) {
+                        for (ChatMessage m : tab0) {
+                            if (!m.isDateSeparator) {
+                                if (m.plainText == null) m.plainText = net.minecraft.util.EnumChatFormatting.getTextWithoutFormattingCodes(m.text);
+                                globalLog.add(m);
+                            }
+                        }
+                    }
+                }
             } catch (Exception e) { e.printStackTrace(); }
         }
     }
 
     // -------------------------------------------------------------------------
-    // Tab management (unchanged interface, now also updates window assignments)
+    // Tab management
     // -------------------------------------------------------------------------
     public void addTab() {
         tabs.add("New Tab"); int idx = tabs.size() - 1;
-        chatHistories.put(idx, new ArrayList<ChatMessage>()); tabFilters.put(idx, "");
+        tabFilters.put(idx, "");
         tabExclusions.put(idx, ""); serverMessageFilters.put(idx, false);
         includeAllFilters.put(idx, false); includeCommandsFilters.put(idx, false);
         includePlayersFilters.put(idx, false); includeCommandResponseFilters.put(idx, false);
         scrollOffsets.put(idx, 0);
-        // New tab goes into the primary window by default
         if (!windows.isEmpty()) windows.get(0).tabIndices.add(idx);
         save();
     }
@@ -372,24 +435,21 @@ public class ChatTabData {
             }
             if (win.selectedLocalTab >= win.tabIndices.size()) win.selectedLocalTab = Math.max(0, win.tabIndices.size() - 1);
         }
-        // Remove ALL empty windows (including window 0 if it becomes empty)
         for (int w = windows.size() - 1; w >= 0; w--) {
             if (windows.get(w).tabIndices.isEmpty()) windows.remove(w);
         }
-        // If no windows remain, create a fallback primary window
         if (windows.isEmpty()) {
             ChatWindowInstance primary = new ChatWindowInstance(windowX, windowY, windowWidth, windowHeight);
             if (!tabs.isEmpty()) primary.tabIndices.add(0);
             windows.add(primary);
         }
-        rebuildMapsAfterDeletion(globalIdx);
+        rebuildSettingMapsAfterDeletion(globalIdx);
         save();
     }
 
-    private void rebuildMapsAfterDeletion(int removedIdx) {
-        int size = tabs.size() + 1;
+    private void rebuildSettingMapsAfterDeletion(int removedIdx) {
+        int size = tabs.size() + 1; // tabs already shrank, so +1 is the old size
         for (int i = removedIdx; i < size - 1; i++) {
-            chatHistories.put(i, chatHistories.getOrDefault(i + 1, new ArrayList<ChatMessage>()));
             tabFilters.put(i, tabFilters.getOrDefault(i + 1, ""));
             tabExclusions.put(i, tabExclusions.getOrDefault(i + 1, ""));
             serverMessageFilters.put(i, serverMessageFilters.getOrDefault(i + 1, false));
@@ -403,7 +463,7 @@ public class ChatTabData {
             tabNotifications.put(i, tabNotifications.getOrDefault(i + 1, false));
         }
         int last = size - 1;
-        chatHistories.remove(last); tabFilters.remove(last); tabExclusions.remove(last);
+        tabFilters.remove(last); tabExclusions.remove(last);
         serverMessageFilters.remove(last); includeAllFilters.remove(last);
         includeCommandsFilters.remove(last); includePlayersFilters.remove(last);
         includeCommandResponseFilters.remove(last);
