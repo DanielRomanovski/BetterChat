@@ -20,7 +20,7 @@ A Minecraft Forge mod for **1.8.9** that completely replaces the default chat wi
 - Tabs can freely move between windows or become their own window
 - Lock window position via the settings menu to prevent accidental moves
 
-![Multiple chat windows open simultaneously](https://github.com/user-attachments/assets/68ed3fa0-de07-4f81-a8a1-52470f0dd17e)
+![Multiple chat windows open simultaneously](https://github.com/user-attachments/assets/b78825e4-ae1d-43c3-ad0a-7eb298037257)
 
 ---
 
