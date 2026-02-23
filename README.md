@@ -3,25 +3,6 @@ A Minecraft Forge mod for **1.8.9** that completely replaces the default chat wi
 
 ---
 
-## Screenshots
-
-**Chat window on Hypixel — Guild chat filter (default)**
-![Chat window](https://github.com/user-attachments/assets/99473415-6ca1-423d-b23b-23b1bbe4c32b)
-
-**Global tab — player messages only**
-![Global tab player messages](https://github.com/user-attachments/assets/645931cf-2e3a-4aff-a8de-d601446b600e)
-
-**Filter settings**
-![Filter settings](https://github.com/user-attachments/assets/68ed3fa0-de07-4f81-a8a1-52470f0dd17e)
-
-**Colors & Style settings**
-![Colors and Style settings](https://github.com/user-attachments/assets/b9c5f81a-a010-4250-a9ef-5388809d6382)
-
-**Color picker**
-![Color picker](https://github.com/user-attachments/assets/635e00f1-4c3b-428c-bfe5-6b2e8f7ba015)
-
----
-
 ## Features
 
 ### 🗂️ Tabbed Chat Windows
@@ -39,6 +20,10 @@ A Minecraft Forge mod for **1.8.9** that completely replaces the default chat wi
 - Tabs can freely move between windows or become their own window
 - Lock window position via the settings menu to prevent accidental moves
 
+![Multiple chat windows open simultaneously](https://github.com/user-attachments/assets/68ed3fa0-de07-4f81-a8a1-52470f0dd17e)
+
+---
+
 ### 🔍 Per-Tab Filtering
 Every tab has its own independent filter configuration, letting you build a chat layout that only shows what you care about:
 - **Inclusion keywords** — only show messages that contain at least one of these words (comma-separated). Useful for a specific player's name, a server channel prefix, or a keyword like `trade`
@@ -52,6 +37,12 @@ Every tab has its own independent filter configuration, letting you build a chat
 
 > Exclusions are checked first, then inclusions. Your own messages always appear on every tab regardless of filters.
 
+![Chat window with Hypixel Guild chat filter active](https://github.com/user-attachments/assets/99473415-6ca1-423d-b23b-23b1bbe4c32b)
+![Global tab with player messages only filter](https://github.com/user-attachments/assets/645931cf-2e3a-4aff-a8de-d601446b600e)
+![Filter settings panel](https://github.com/user-attachments/assets/6eab3235-8e78-4f56-a2d5-c3f5a7db0f6d)
+
+---
+
 ### 📜 Persistent Chat History
 - All chat messages are saved to disk and **persist across sessions** — your full history is always there when you log back in
 - History is shared across all tabs — each tab just filters the same global log differently, so no messages are ever lost
@@ -63,6 +54,8 @@ Every tab has its own independent filter configuration, letting you build a chat
 - The scroll bar represents only the **current day's** messages — always a comfortable, usable size no matter how much history you have
 - **▲ / ▼ arrows** appear on the scroll bar to jump between days
 - The date (`MM/DD`) is shown next to the arrows when browsing older history
+
+---
 
 ### 🎨 Full Visual Customization
 Open the settings panel (⚙ gear icon on any window) to customize:
@@ -81,6 +74,11 @@ Open the settings panel (⚙ gear icon on any window) to customize:
 
 **Per-Tab Settings** *(accessible from the Filters page)*
 - Configure inclusion/exclusion keywords, message type toggles, and prefix/suffix per tab, all from one panel
+
+![Colors and Style settings panel](https://github.com/user-attachments/assets/b9c5f81a-a010-4250-a9ef-5388809d6382)
+![HSB Color picker with hue ring, opacity slider and hex input](https://github.com/user-attachments/assets/635e00f1-4c3b-428c-bfe5-6b2e8f7ba015)
+
+---
 
 ### 🔔 Unread Notifications
 - A colored dot appears on any tab that received a new message while you weren't looking at it
