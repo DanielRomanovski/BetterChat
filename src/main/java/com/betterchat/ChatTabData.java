@@ -1,4 +1,4 @@
-package com.example.examplemod;
+package com.betterchat;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.util.IChatComponent;
@@ -113,8 +113,8 @@ public class ChatTabData {
     public ChatTabData() {
         File configDir = new File(Minecraft.getMinecraft().mcDataDir, "config");
         if (!configDir.exists()) configDir.mkdirs();
-        this.configFile = new File(configDir, "cleanchat.txt");
-        this.logFile    = new File(configDir, "cleanchat_logs.dat");
+        this.configFile = new File(configDir, "betterchat.txt");
+        this.logFile    = new File(configDir, "betterchat_logs.dat");
         load();
     }
 

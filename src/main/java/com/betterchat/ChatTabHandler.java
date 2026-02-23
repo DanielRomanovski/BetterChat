@@ -1,4 +1,4 @@
-package com.example.examplemod;
+package com.betterchat;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.Gui;
