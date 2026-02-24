@@ -30,6 +30,7 @@ public class ChatTabData {
     public final Map<Integer, Boolean> includeCommandsFilters       = new HashMap<>();
     public final Map<Integer, Boolean> includePlayersFilters        = new HashMap<>();
     public final Map<Integer, Boolean> includeCommandResponseFilters = new HashMap<>();
+    public final Map<Integer, Boolean> sentByMeFilters               = new HashMap<>();
     public final Map<Integer, String>  tabPrefixes                  = new HashMap<>();
     public final Map<Integer, String>  tabSuffixes                  = new HashMap<>();
     public final Map<Integer, Integer> scrollOffsets                = new HashMap<>();
@@ -368,10 +369,11 @@ public class ChatTabData {
             }
         }
 
-        // Inclusion checks
-        if (msg.isLocal) return true;
+        // Inclusion checks — each filter maps to exactly one category, no overlaps.
+        // "Messages Sent by Me": only messages the local player sent
+        if (sentByMeFilters.getOrDefault(tabIdx, false) && msg.isLocal) return true;
+        // "All Messages": everything (master override)
         if (includeAllFilters.getOrDefault(tabIdx, false)) return true;
-        if (!playerName.isEmpty() && plain.contains(playerName)) return true;
 
         String f = tabFilters.getOrDefault(tabIdx, "");
         if (!f.isEmpty()) {
@@ -379,9 +381,14 @@ public class ChatTabData {
                 if (!k.trim().isEmpty() && plain.toLowerCase().contains(k.trim().toLowerCase())) return true;
             }
         }
+        // "Commands": messages that look like commands (start with /)
         if (includeCommandsFilters.getOrDefault(tabIdx, false) && msg.isCommand) return true;
-        if (serverMessageFilters.getOrDefault(tabIdx, false) && !msg.isOtherPlayer) return true;
-        if (includePlayersFilters.getOrDefault(tabIdx, false) && msg.isOtherPlayer) return true;
+        // "Server Messages": server-generated output — not from any player, not a command, not a command response
+        if (serverMessageFilters.getOrDefault(tabIdx, false)
+                && !msg.isOtherPlayer && !msg.isLocal && !msg.isCommand && !msg.isCommandResponse) return true;
+        // "Player Messages": messages from other players only (never the local player)
+        if (includePlayersFilters.getOrDefault(tabIdx, false) && msg.isOtherPlayer && !msg.isLocal) return true;
+        // "Command Responses": server replies that arrived shortly after the player ran a command
         if (includeCommandResponseFilters.getOrDefault(tabIdx, false) && msg.isCommandResponse) return true;
 
         return false;
@@ -537,14 +544,15 @@ public class ChatTabData {
             for (int i = 0; i < tabs.size(); i++) {
                 String filter    = tabFilters.getOrDefault(i, "");
                 String exclusion = tabExclusions.getOrDefault(i, "");
-                boolean serverMsgs = serverMessageFilters.getOrDefault(i, false);
-                boolean incAll     = includeAllFilters.getOrDefault(i, false);
-                boolean incCmd     = includeCommandsFilters.getOrDefault(i, false);
-                boolean incPlayers = includePlayersFilters.getOrDefault(i, false);
-                boolean incCmdResp = includeCommandResponseFilters.getOrDefault(i, false);
+                boolean serverMsgs  = serverMessageFilters.getOrDefault(i, false);
+                boolean incAll      = includeAllFilters.getOrDefault(i, false);
+                boolean incCmd      = includeCommandsFilters.getOrDefault(i, false);
+                boolean incPlayers  = includePlayersFilters.getOrDefault(i, false);
+                boolean incCmdResp  = includeCommandResponseFilters.getOrDefault(i, false);
+                boolean sentByMe    = sentByMeFilters.getOrDefault(i, false);
                 String pre = tabPrefixes.getOrDefault(i, "");
                 String suf = tabSuffixes.getOrDefault(i, "");
-                writer.println("TAB_V6:" + tabs.get(i) + "|" + filter + "|" + exclusion + "|" + serverMsgs + "|" + incAll + "|" + incCmd + "|" + pre + "|" + suf + "|" + incPlayers + "|" + incCmdResp);
+                writer.println("TAB_V8:" + tabs.get(i) + "|" + filter + "|" + exclusion + "|" + serverMsgs + "|" + incAll + "|" + incCmd + "|" + pre + "|" + suf + "|" + incPlayers + "|" + incCmdResp + "|" + sentByMe);
             }
             saveHistory();
         } catch (IOException e) { e.printStackTrace(); }
@@ -656,7 +664,7 @@ public class ChatTabData {
                         primaryWindowRaw = line.substring(15).split(",");
                     } else if (line.startsWith("WINDOW:")) {
                         pendingWindows.add(line.substring(7).split(","));
-                    } else if (line.startsWith("TAB_V6:")) {
+                    } else if (line.startsWith("TAB_V8:")) {
                         String[] parts = line.substring(7).split("\\|");
                         tabs.add(parts[0]); int idx = tabs.size() - 1;
                         if (parts.length > 1) tabFilters.put(idx, parts[1]);
@@ -668,6 +676,22 @@ public class ChatTabData {
                         if (parts.length > 7) tabSuffixes.put(idx, parts[7]);
                         if (parts.length > 8) includePlayersFilters.put(idx, Boolean.parseBoolean(parts[8]));
                         if (parts.length > 9) includeCommandResponseFilters.put(idx, Boolean.parseBoolean(parts[9]));
+                        // TAB_V8: sentByMeFilters was reliably saved — trust the stored value
+                        sentByMeFilters.put(idx, parts.length > 10 ? Boolean.parseBoolean(parts[10]) : true);
+                    } else if (line.startsWith("TAB_V7:") || line.startsWith("TAB_V6:")) {
+                        String[] parts = line.substring(7).split("\\|");
+                        tabs.add(parts[0]); int idx = tabs.size() - 1;
+                        if (parts.length > 1) tabFilters.put(idx, parts[1]);
+                        if (parts.length > 2) tabExclusions.put(idx, parts[2]);
+                        if (parts.length > 3) serverMessageFilters.put(idx, Boolean.parseBoolean(parts[3]));
+                        if (parts.length > 4) includeAllFilters.put(idx, Boolean.parseBoolean(parts[4]));
+                        if (parts.length > 5) includeCommandsFilters.put(idx, Boolean.parseBoolean(parts[5]));
+                        if (parts.length > 6) tabPrefixes.put(idx, parts[6]);
+                        if (parts.length > 7) tabSuffixes.put(idx, parts[7]);
+                        if (parts.length > 8) includePlayersFilters.put(idx, Boolean.parseBoolean(parts[8]));
+                        if (parts.length > 9) includeCommandResponseFilters.put(idx, Boolean.parseBoolean(parts[9]));
+                        // TAB_V7: sentByMeFilters was never reliably set by the old code — always default ON
+                        sentByMeFilters.put(idx, true);
                     }
                 }
             } catch (Exception e) { e.printStackTrace(); }
@@ -740,9 +764,13 @@ public class ChatTabData {
     public void addTab() {
         tabs.add("New Tab"); int idx = tabs.size() - 1;
         tabFilters.put(idx, "");
-        tabExclusions.put(idx, ""); serverMessageFilters.put(idx, false);
-        includeAllFilters.put(idx, false); includeCommandsFilters.put(idx, false);
-        includePlayersFilters.put(idx, false); includeCommandResponseFilters.put(idx, false);
+        tabExclusions.put(idx, "");
+        serverMessageFilters.put(idx, true);
+        includeAllFilters.put(idx, false);
+        includeCommandsFilters.put(idx, true);
+        includePlayersFilters.put(idx, true);
+        includeCommandResponseFilters.put(idx, true);
+        sentByMeFilters.put(idx, true);
         scrollOffsets.put(idx, 0);
         if (!windows.isEmpty()) windows.get(0).tabIndices.add(idx);
         save();
@@ -786,6 +814,7 @@ public class ChatTabData {
             includeCommandsFilters.put(i, includeCommandsFilters.getOrDefault(i + 1, false));
             includePlayersFilters.put(i, includePlayersFilters.getOrDefault(i + 1, false));
             includeCommandResponseFilters.put(i, includeCommandResponseFilters.getOrDefault(i + 1, false));
+            sentByMeFilters.put(i, sentByMeFilters.getOrDefault(i + 1, true));
             tabPrefixes.put(i, tabPrefixes.getOrDefault(i + 1, ""));
             tabSuffixes.put(i, tabSuffixes.getOrDefault(i + 1, ""));
             scrollOffsets.put(i, scrollOffsets.getOrDefault(i + 1, 0));
@@ -795,7 +824,7 @@ public class ChatTabData {
         tabFilters.remove(last); tabExclusions.remove(last);
         serverMessageFilters.remove(last); includeAllFilters.remove(last);
         includeCommandsFilters.remove(last); includePlayersFilters.remove(last);
-        includeCommandResponseFilters.remove(last);
+        includeCommandResponseFilters.remove(last); sentByMeFilters.remove(last);
         tabPrefixes.remove(last); tabSuffixes.remove(last);
         scrollOffsets.remove(last); tabNotifications.remove(last);
     }

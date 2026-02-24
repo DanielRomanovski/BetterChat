@@ -81,8 +81,8 @@ public class ChatTabHandler {
     private int     scrollBarDragStartOffset = 0;
 
     // ── HUD fade ──────────────────────────────────────────────────────────────
-    private float hudFade          = 0f;
-    private long  hudFadeLastFrame = 0L;
+    /** Timestamp when the HUD fade was last triggered by a visible message. -1 = never shown. */
+    private long hudFadeStartTime = -1L;
 
     // -------------------------------------------------------------------------
     // Screen helpers
@@ -137,13 +137,20 @@ public class ChatTabHandler {
             }
         }
 
-        long elapsed = System.currentTimeMillis() - data.lastMessageTime;
-        if (elapsed > 7000) return;
+        if (hudFadeStartTime < 0) return;
+        long elapsed = System.currentTimeMillis() - hudFadeStartTime;
+        if (elapsed >= 7000) {
+            hudFadeStartTime = -1L; // fully expired — reset so we don't re-enter next frame
+            return;
+        }
         float fade = (elapsed > 6000)
-                ? Math.max(0f, Math.min(1f, 1.0f - (float)(elapsed - 6000) / 1000f))
+                ? Math.max(0f, 1.0f - (float)(elapsed - 6000) / 1000f)
                 : 1.0f;
-        if (fade <= 0f) return;
-        int fadeAlpha = Math.max(0, Math.min(255, (int)(fade * 255)));
+        int fadeAlpha = (int)(fade * 255);
+        if (fadeAlpha <= 0) {
+            hudFadeStartTime = -1L;
+            return;
+        }
 
         for (ChatTabData.ChatWindowInstance win : data.windows) {
             int bgColor  = applyFadeToColor(data.getHex(data.colorFadeBackground, data.opacFadeBackground), fadeAlpha);
@@ -180,10 +187,19 @@ public class ChatTabHandler {
         String formatted = event.message.getFormattedText();
         data.playerName = Minecraft.getMinecraft().thePlayer.getName();
 
-        boolean isLocal        = plain.startsWith("<" + data.playerName + ">") || plain.startsWith(data.playerName + ":");
-        boolean isOtherPlayer  = (plain.startsWith("<") && plain.contains(">")) || (plain.contains(":") && !plain.startsWith("["));
-        boolean isCommand      = plain.startsWith("/");
+        boolean isLocal           = plain.startsWith("<" + data.playerName + ">") || plain.startsWith(data.playerName + ":");
+        // isOtherPlayer: ONLY the strict <Name> text format where Name is a valid MC username.
+        // We match "<" + 1-16 word chars + ">" at the start, then exclude our own name.
+        // This prevents server messages with angle brackets (e.g. "<Usage: /give <player>>",
+        // "<red>some text") from being misclassified as player chat.
+        boolean isOtherPlayer     = !isLocal
+                && java.util.regex.Pattern.compile("^<\\w{1,16}>\\s").matcher(plain).find()
+                && !plain.startsWith("<" + data.playerName + ">");
+        // Command responses: any non-local, non-player-chat message that arrives while the
+        // player is in command-response mode (set by sending "/" commands, cleared by normal chat).
         boolean isCommandResponse = !isLocal && !isOtherPlayer && input.isWithinCommandResponseWindow();
+        // isCommand is for player-sent commands injected directly into the log (never echoed by server).
+        boolean isCommand         = plain.startsWith("/");
 
         ChatTabData.ChatMessage msg = new ChatTabData.ChatMessage(
                 formatted, false, event.message,
@@ -212,34 +228,56 @@ public class ChatTabHandler {
 
         data.globalLog.add(msg);
 
+        boolean withinDebounce = (System.currentTimeMillis() - input.getLastPlayerSendTime())
+                <= ChatInputHandler.SEND_ECHO_DEBOUNCE_MS;
+        // The tab the player was actively typing in when they sent (used for the echo exception)
+        int sentFromTab = input.getLastSentFromTabIndex();
+
+        boolean passedAnyTab        = false;
+        boolean passedBackgroundTab = false; // true if message went into a tab not currently on screen
+        boolean passedSelectedTab   = false; // true if message went into a tab currently selected in any window
         for (int i = 0; i < data.tabs.size(); i++) {
-            if (data.messagePassesFilter(i, msg)) {
+            // Normal filter check; PLUS: if this is the player's own echo arriving within the
+            // debounce window, always show it in the tab they sent from (regardless of filter).
+            boolean passes = data.messagePassesFilter(i, msg)
+                    || (isLocal && withinDebounce && i == sentFromTab);
+            if (passes) {
+                passedAnyTab = true;
                 renderer.lineCache.remove(i);
                 renderer.lineCacheHistorySize.put(i, -1);
                 for (ChatTabData.ChatWindowInstance win : data.windows) {
-                    if (!isLocal && win.getSelectedGlobalIndex() != i && win.tabIndices.contains(i))
-                        data.tabNotifications.put(i, true);
+                    if (win.tabIndices.contains(i)) {
+                        if (win.getSelectedGlobalIndex() == i) {
+                            passedSelectedTab = true;
+                        } else if (!isLocal) {
+                            data.tabNotifications.put(i, true);
+                            passedBackgroundTab = true;
+                        }
+                    }
                 }
             }
         }
 
         long now = System.currentTimeMillis();
-        if (now - input.getLastPlayerSendTime() > ChatInputHandler.SEND_ECHO_DEBOUNCE_MS) {
-            data.lastMessageTime = now;
-            hudFade = 1.0f;
-            hudFadeLastFrame = now;
+        // For non-echo messages (or after debounce expires), trigger HUD/notifications.
+        if (!withinDebounce || !isLocal) {
+            // Only trigger the HUD fade if the message appeared in a currently selected tab
+            if (passedSelectedTab) {
+                hudFadeStartTime = now;
+                data.lastMessageTime = now;
+            }
 
-            // ── Notifications ────────────────────────────────────────────────
+            // ── Notifications — only fire if message passed at least one tab's filter ──
             final Minecraft mc = Minecraft.getMinecraft();
-            if (data.showNotifications) {
+            if (data.showNotifications && passedAnyTab) {
                 if (data.soundNotifications && mc.theWorld != null && mc.thePlayer != null) {
-                    // Play assets/betterchat/sounds/notify.ogg via the sound handler
                     net.minecraft.client.audio.PositionedSoundRecord sound =
                         net.minecraft.client.audio.PositionedSoundRecord.create(
                             new net.minecraft.util.ResourceLocation("betterchat", "notify"), 1.0f);
                     mc.getSoundHandler().playSound(sound);
                 }
-                if (data.windowsNotifications && !org.lwjgl.opengl.Display.isActive()) {
+                // Windows notifications only fire for background tabs (no point alerting for visible messages)
+                if (data.windowsNotifications && passedBackgroundTab && !org.lwjgl.opengl.Display.isActive()) {
                     sendWindowsNotification("BetterChat", plain);
                 }
             }
@@ -980,6 +1018,15 @@ public class ChatTabHandler {
         // Send message
         if (k == Keyboard.KEY_RETURN && event.gui instanceof GuiChat) {
             input.trySendMessage((GuiChat) event.gui, customChatField);
+            hudFadeStartTime = System.currentTimeMillis();
+            // If a command was injected into globalLog by trySendMessage, invalidate
+            // the line cache for every tab so the new entry shows up immediately.
+            if (!data.globalLog.isEmpty() && data.globalLog.get(data.globalLog.size() - 1).isCommand) {
+                for (int i = 0; i < data.tabs.size(); i++) {
+                    renderer.lineCache.remove(i);
+                    renderer.lineCacheHistorySize.put(i, -1);
+                }
+            }
             Minecraft.getMinecraft().displayGuiScreen(null);
             event.setCanceled(true);
             return;

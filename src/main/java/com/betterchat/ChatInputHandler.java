@@ -27,9 +27,19 @@ public class ChatInputHandler {
     private long lastPlayerCommandTime = 0;
     public static final long COMMAND_RESPONSE_WINDOW_MS = 3000;
 
+    /**
+     * True after the player sends a "/" command, false once they send normal chat.
+     * Used to route server replies to the "Command Responses" filter reliably,
+     * without depending on a narrow time window that network lag can break.
+     */
+    private boolean commandResponseMode = false;
+
     // Used to avoid counting the player's own message as a new "last message" (HUD fade debounce).
     private long lastPlayerSendTime = 0;
     public static final long SEND_ECHO_DEBOUNCE_MS = 1000;
+
+    /** The global tab index the player was on when they last sent a message. -1 if unknown. */
+    private int lastSentFromTabIndex = -1;
 
     // ── Sent-message history ──────────────────────────────────────────────────
     /** Messages sent this session, oldest-first.  Max 100 entries. */
@@ -53,14 +63,24 @@ public class ChatInputHandler {
     // -------------------------------------------------------------------------
 
     /** Call this whenever the player sends a command so responses can be tagged. */
-    public void onPlayerSentCommand() { lastPlayerCommandTime = System.currentTimeMillis(); }
+    public void onPlayerSentCommand() {
+        lastPlayerCommandTime = System.currentTimeMillis();
+        commandResponseMode = true;
+    }
+
+    /** Call this when the player sends normal (non-command) chat to end command-response mode. */
+    public void onPlayerSentChat() {
+        commandResponseMode = false;
+    }
 
     public long getLastPlayerCommandTime()  { return lastPlayerCommandTime; }
     public long getLastPlayerSendTime()     { return lastPlayerSendTime; }
+    public int  getLastSentFromTabIndex()   { return lastSentFromTabIndex; }
 
-    /** Returns true if we are still inside the command-response attribution window. */
+    /** Returns true if the next server message should be treated as a command response. */
     public boolean isWithinCommandResponseWindow() {
-        return (System.currentTimeMillis() - lastPlayerCommandTime) < COMMAND_RESPONSE_WINDOW_MS;
+        return commandResponseMode
+                || (System.currentTimeMillis() - lastPlayerCommandTime) < COMMAND_RESPONSE_WINDOW_MS;
     }
 
     // -------------------------------------------------------------------------
@@ -102,11 +122,23 @@ public class ChatInputHandler {
         String finalText = prefix + rawText + suffix;
 
         if (finalText.startsWith("/")) onPlayerSentCommand();
+        else                           onPlayerSentChat();
         if (inputField != null)    inputField.setText("");
         if (customChatField != null) customChatField.setText("");
 
+        // Inject player-sent commands directly into the global log.
+        // Commands are never echoed back by the server, so onChatReceived never fires for them.
+        // Without this they would never appear in any tab even with the "Commands" filter on.
+        if (finalText.startsWith("/")) {
+            ChatTabData.ChatMessage cmdMsg = new ChatTabData.ChatMessage(
+                    finalText, false, null,
+                    false, false, true, false, finalText);
+            data.globalLog.add(cmdMsg);
+        }
+
         Minecraft.getMinecraft().thePlayer.sendChatMessage(finalText);
         lastPlayerSendTime = System.currentTimeMillis();
+        lastSentFromTabIndex = globalIdx;
         data.lastMessageTime = System.currentTimeMillis();
         return true;
     }
@@ -163,6 +195,7 @@ public class ChatInputHandler {
         switch (action) {
             case RUN_COMMAND:
                 if (value.startsWith("/")) onPlayerSentCommand();
+                else                       onPlayerSentChat();
                 mc.thePlayer.sendChatMessage(value);
                 break;
             case SUGGEST_COMMAND:
