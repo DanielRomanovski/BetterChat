@@ -43,6 +43,8 @@ public class ChatTabHandler {
     private boolean      isSettingsOpen           = false;
     private boolean      wasChatOpen              = false;
     private GuiTextField renameField, customChatField;
+    /** Last text we pushed into the vanilla field — used to detect tab-autocomplete mutations. */
+    private String       lastSentToVanilla = "";
     private long         lastClickTime            = 0;
     private int          lastClickedGlobalIndex   = -1;
 
@@ -67,10 +69,12 @@ public class ChatTabHandler {
     private int     playerMenuX         = 0, playerMenuY = 0;
     private static final int PM_W = 130, PM_ROW = 16;
     private static final String[] PM_LABELS = {"Temp Mute (10 min)", "Perma Mute"};
-    // Latch: true while right-mouse is held, prevents repeat-triggering each frame.
+    // Latch so we only trigger the menu once per right-click press
     private boolean rightClickWasDown   = false;
     // Counts frames since menu opened — ignore dismiss clicks for the first few frames.
     private int     menuOpenFrames      = 0;
+    // Per-keybind latch for edge-detection (prevents repeated firing while held)
+    private final java.util.IdentityHashMap<ChatTabData.KeybindEntry, Boolean> keybindLatch = new java.util.IdentityHashMap<>();
     private boolean isDraggingScrollBar      = false;
     private int     scrollBarDragWindowIndex = -1;
     private int     scrollBarDragStartY      = 0;
@@ -113,6 +117,26 @@ public class ChatTabHandler {
         if (!data.hideDefaultChat) return;
         Minecraft mc = Minecraft.getMinecraft();
         if (mc.currentScreen instanceof GuiChat) return;
+
+        // ── Poll keybinds ────────────────────────────────────────────────────
+        for (ChatTabData.KeybindEntry kb : data.keybinds) {
+            if (!kb.message.isEmpty() && !kb.keyCodes.isEmpty()) {
+                // All keys in the combo must be held simultaneously
+                boolean pressed = true;
+                for (int kc : kb.keyCodes) {
+                    if (!org.lwjgl.input.Keyboard.isKeyDown(kc)) { pressed = false; break; }
+                }
+                if (pressed) {
+                    if (!keybindLatch.getOrDefault(kb, false)) {
+                        keybindLatch.put(kb, true);
+                        if (mc.thePlayer != null) mc.thePlayer.sendChatMessage(kb.message);
+                    }
+                } else {
+                    keybindLatch.put(kb, false);
+                }
+            }
+        }
+
         long elapsed = System.currentTimeMillis() - data.lastMessageTime;
         if (elapsed > 7000) return;
         float fade = (elapsed > 6000)
@@ -204,8 +228,74 @@ public class ChatTabHandler {
             data.lastMessageTime = now;
             hudFade = 1.0f;
             hudFadeLastFrame = now;
+
+            // ── Notifications ────────────────────────────────────────────────
+            final Minecraft mc = Minecraft.getMinecraft();
+            if (data.showNotifications) {
+                if (data.soundNotifications && mc.theWorld != null && mc.thePlayer != null) {
+                    // Play assets/betterchat/sounds/notify.ogg via the sound handler
+                    net.minecraft.client.audio.PositionedSoundRecord sound =
+                        net.minecraft.client.audio.PositionedSoundRecord.create(
+                            new net.minecraft.util.ResourceLocation("betterchat", "notify"), 1.0f);
+                    mc.getSoundHandler().playSound(sound);
+                }
+                if (data.windowsNotifications && !org.lwjgl.opengl.Display.isActive()) {
+                    sendWindowsNotification("BetterChat", plain);
+                }
+            }
+
+            // ── Auto-responses ───────────────────────────────────────────────
+            if (!isLocal) {
+                String lowerPlain = plain.toLowerCase();
+                for (ChatTabData.AutoResponseEntry ar : data.autoResponses) {
+                    if (!ar.trigger.isEmpty() && lowerPlain.contains(ar.trigger.toLowerCase())) {
+                        final String resp = ar.response;
+                        mc.addScheduledTask(new Runnable() {
+                            public void run() {
+                                if (Minecraft.getMinecraft().thePlayer != null)
+                                    Minecraft.getMinecraft().thePlayer.sendChatMessage(resp);
+                            }
+                        });
+                        break;
+                    }
+                }
+            }
         }
         data.save();
+    }
+
+    // ── Windows / system-tray notifications ──────────────────────────────────
+
+    private static java.awt.TrayIcon trayIcon   = null;
+    private static boolean           trayFailed = false;
+
+    /** Shows a system-tray balloon notification. Safe to call from any thread. */
+    private static void sendWindowsNotification(String title, String message) {
+        if (trayFailed) return;
+        try {
+            if (!java.awt.SystemTray.isSupported()) { trayFailed = true; return; }
+
+            // Lazy-init the tray icon once
+            if (trayIcon == null) {
+                java.awt.SystemTray tray = java.awt.SystemTray.getSystemTray();
+                // 16×16 solid green icon as a stand-in (no external image needed)
+                java.awt.image.BufferedImage img = new java.awt.image.BufferedImage(
+                        16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+                java.awt.Graphics2D g = img.createGraphics();
+                g.setColor(new java.awt.Color(0x4E9EFF));
+                g.fillOval(0, 0, 16, 16);
+                g.dispose();
+                trayIcon = new java.awt.TrayIcon(img, "BetterChat");
+                trayIcon.setImageAutoSize(true);
+                tray.add(trayIcon);
+            }
+
+            // Truncate message to avoid overly long balloons
+            String safeMsg = message.length() > 200 ? message.substring(0, 197) + "..." : message;
+            trayIcon.displayMessage(title, safeMsg, java.awt.TrayIcon.MessageType.INFO);
+        } catch (Exception e) {
+            trayFailed = true;
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -229,7 +319,10 @@ public class ChatTabHandler {
             renderer.targetCacheScrollOffset.replaceAll((k, v) -> Integer.MIN_VALUE);
             wasChatOpen = false;
         }
-        if (event.gui instanceof GuiChat) wasChatOpen = true;
+        if (event.gui instanceof GuiChat) {
+            wasChatOpen = true;
+            input.resetHistoryCursor(); // fresh navigation every time chat opens
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -238,7 +331,7 @@ public class ChatTabHandler {
 
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public void onDraw(GuiScreenEvent.DrawScreenEvent.Post event) {
-        if (!(event.gui instanceof GuiChat)) { customChatField = null; return; }
+        if (!(event.gui instanceof GuiChat)) { customChatField = null; lastSentToVanilla = ""; return; }
         wasChatOpen = true;
 
         Minecraft mc = Minecraft.getMinecraft();
@@ -489,15 +582,37 @@ public class ChatTabHandler {
         if (winIdx == 0 && data.hideDefaultChat && mc.currentScreen instanceof GuiChat) {
             GuiTextField vf = input.getVanillaInputField((GuiChat) mc.currentScreen);
             if (vf != null) {
+                // Keep vanilla field off-screen so it isn't drawn
                 vf.width = 0; vf.yPosition = -100;
+
                 if (customChatField == null) {
                     customChatField = new GuiTextField(999, mc.fontRendererObj,
                             win.x + 4, win.y + win.height + 4, win.width - 8, 12);
-                    customChatField.setMaxStringLength(100);
+                    customChatField.setMaxStringLength(256);
                     customChatField.setEnableBackgroundDrawing(false);
+                    // Seed from vanilla only on first creation (e.g. /command pre-fill)
+                    if (!vf.getText().isEmpty()) {
+                        customChatField.setText(vf.getText());
+                        customChatField.setCursorPositionEnd();
+                    }
+                    customChatField.setFocused(true);
+                    lastSentToVanilla = customChatField.getText();
                 }
-                customChatField.setText(vf.getText());
-                customChatField.setCursorPosition(vf.getCursorPosition());
+
+                String vfText = vf.getText();
+                // If vanilla changed its own text (tab-autocomplete callback from server),
+                // pull that change into customChatField.
+                if (!vfText.equals(lastSentToVanilla)) {
+                    customChatField.setText(vfText);
+                    customChatField.setCursorPositionEnd();
+                }
+
+                // Always keep vanilla in sync with what we have, so future TAB
+                // presses / autocomplete requests have the right text to work from.
+                vf.setText(customChatField.getText());
+                vf.setCursorPosition(customChatField.getCursorPosition());
+                lastSentToVanilla = customChatField.getText();
+
                 Gui.drawRect(win.x, win.y + win.height,
                         win.x + win.width, win.y + win.height + 16,
                         data.getHex(data.colorInput, data.opacInput));
@@ -839,8 +954,11 @@ public class ChatTabHandler {
 
         // Settings open
         if (isSettingsOpen) {
-            if (k == Keyboard.KEY_ESCAPE) isSettingsOpen = false;
-            else settings.keyTyped(c, k);
+            if (k == Keyboard.KEY_ESCAPE && !settings.isRecordingKeybind()) {
+                isSettingsOpen = false;
+            } else {
+                settings.keyTyped(c, k);
+            }
             event.setCanceled(true); return;
         }
 
@@ -863,6 +981,37 @@ public class ChatTabHandler {
         if (k == Keyboard.KEY_RETURN && event.gui instanceof GuiChat) {
             input.trySendMessage((GuiChat) event.gui, customChatField);
             Minecraft.getMinecraft().displayGuiScreen(null);
+            event.setCanceled(true);
+            return;
+        }
+
+        // History navigation — UP = older, DOWN = newer
+        if ((k == Keyboard.KEY_UP || k == Keyboard.KEY_DOWN) && event.gui instanceof GuiChat) {
+            if (customChatField != null) {
+                input.navigateHistory(k == Keyboard.KEY_UP, customChatField);
+                event.setCanceled(true);
+            }
+            return;
+        }
+
+        // TAB autocomplete — vanilla field is kept in sync every draw frame, so
+        // just let the event fall through to vanilla GuiChat unchanged.
+        // The draw loop will detect when vanilla's autocomplete callback mutates
+        // the vanilla field and copy the result back to customChatField.
+        if (k == Keyboard.KEY_TAB && event.gui instanceof GuiChat) {
+            return; // not canceled — vanilla processes TAB normally
+        }
+
+        // Route all other keystrokes directly to customChatField so it is the
+        // sole source of truth. This also resets history browsing when the user
+        // types a new character.
+        if (customChatField != null && event.gui instanceof GuiChat
+                && k != Keyboard.KEY_ESCAPE) {
+            // Any real character typed resets history cursor to live input
+            if (c >= 32 || k == Keyboard.KEY_BACK || k == Keyboard.KEY_DELETE) {
+                input.resetHistoryCursor();
+            }
+            customChatField.textboxKeyTyped(c, k);
             event.setCanceled(true);
         }
     }

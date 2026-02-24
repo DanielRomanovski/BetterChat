@@ -64,7 +64,6 @@ public class ChatTabData {
     public boolean saveChatLog      = true;
     public boolean isLocked         = false;
     public boolean showTimeStamps   = true;
-    public boolean showNotifications = true;
 
     // Chat display features
     /** Master toggle — when true, all custom-font sub-settings are active. */
@@ -93,8 +92,61 @@ public class ChatTabData {
     public boolean stripPlayerBrackets   = false;
 
     // Mute/ignore lists (player name → expiry ms, or Long.MAX_VALUE for permanent)
-    public final Map<String, Long>    mutedPlayers  = new HashMap<>(); // temp + perma mute
-    public final java.util.Set<String> ignoredPlayers = new java.util.HashSet<>(); // ignore (hide messages)
+    public final Map<String, Long>    mutedPlayers  = new HashMap<>();
+    public final java.util.Set<String> ignoredPlayers = new java.util.HashSet<>();
+
+    // ── Notification types ────────────────────────────────────────────────────
+    /** Master toggle — show any notification when a message arrives. */
+    public boolean showNotifications    = true;
+    /** Play an in-game sound when a message arrives in a tab with notifications on. */
+    public boolean soundNotifications   = true;
+    /** Send a Windows (system tray) notification when the game is not focused. */
+    public boolean windowsNotifications = false;
+
+    // ── Keybind entries ───────────────────────────────────────────────────────
+    /** A keyboard shortcut (one or more keys held simultaneously) that sends a preset chat message. */
+    public static class KeybindEntry implements java.io.Serializable {
+        /** LWJGL key codes that must ALL be held simultaneously to trigger. */
+        public List<Integer> keyCodes = new ArrayList<>();
+        /** The message/command to send. */
+        public String message = "";
+        /** Human-readable label shown in the settings UI. */
+        public String label   = "";
+
+        public KeybindEntry() {}
+        public KeybindEntry(List<Integer> keyCodes, String message, String label) {
+            this.keyCodes = new ArrayList<>(keyCodes);
+            this.message  = message;
+            this.label    = label;
+        }
+
+        /** Returns a display string like "LSHIFT+A" for the bound key combo. */
+        public String displayKey() {
+            if (keyCodes.isEmpty()) return "None";
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < keyCodes.size(); i++) {
+                if (i > 0) sb.append('+');
+                String name = org.lwjgl.input.Keyboard.getKeyName(keyCodes.get(i));
+                sb.append(name != null ? name : "?");
+            }
+            return sb.toString();
+        }
+    }
+
+    /** An auto-response rule: if the chat contains {@code trigger}, send {@code response}. */
+    public static class AutoResponseEntry implements java.io.Serializable {
+        public String trigger  = "";
+        public String response = "";
+
+        public AutoResponseEntry() {}
+        public AutoResponseEntry(String trigger, String response) {
+            this.trigger  = trigger;
+            this.response = response;
+        }
+    }
+
+    public final List<KeybindEntry>      keybinds      = new ArrayList<>();
+    public final List<AutoResponseEntry> autoResponses = new ArrayList<>();
 
     // -------------------------------------------------------------------------
     // ChatWindowInstance  —  one draggable/resizable chat window on screen
@@ -424,7 +476,7 @@ public class ChatTabData {
         colorInput = "000000";     opacInput     = 204;
         colorFadeTopBar = "000000";     opacFadeTopBar     = 0;
         colorFadeBackground = "000000"; opacFadeBackground = 0;
-        showNotifications = true;
+        showNotifications = true; soundNotifications = true; windowsNotifications = false;
         save();
     }
 
@@ -442,7 +494,21 @@ public class ChatTabData {
             writer.println("OPAC_V2:" + opacSelection + "," + opacTopBar + "," + opacBackground + "," + opacText + "," + opacTime + "," + opacInput);
             writer.println("FADE_STYLE:" + colorFadeTopBar + "," + colorFadeBackground);
             writer.println("FADE_OPAC:" + opacFadeTopBar + "," + opacFadeBackground);
-            writer.println("FLAGS_V2:" + hideDefaultChat + "," + saveChatLog + "," + isLocked + "," + showTimeStamps + "," + showNotifications);
+            writer.println("FLAGS_V2:" + hideDefaultChat + "," + saveChatLog + "," + isLocked + "," + showTimeStamps + "," + showNotifications + "," + soundNotifications + "," + windowsNotifications);
+            // Keybinds: KEYBIND:k1;k2;k3|message|label
+            for (KeybindEntry kb : keybinds) {
+                StringBuilder kcs = new StringBuilder();
+                for (int i = 0; i < kb.keyCodes.size(); i++) {
+                    if (i > 0) kcs.append(';');
+                    kcs.append(kb.keyCodes.get(i));
+                }
+                writer.println("KEYBIND:" + kcs + "|"
+                        + kb.message.replace("|","§p") + "|" + kb.label.replace("|","§p"));
+            }
+            // Auto-responses
+            for (AutoResponseEntry ar : autoResponses) {
+                writer.println("AUTORESPONSE:" + ar.trigger.replace("|","§p") + "|" + ar.response.replace("|","§p"));
+            }
             writer.println("DISPLAY2:" + fontSizeEnabled
                 + "," + String.format(Locale.US, "%.2f", fontSize)
                 + "," + fontEnabled + "," + fontName.replace(",","|")
@@ -534,7 +600,27 @@ public class ChatTabData {
                         String[] f = line.substring(9).split(",");
                         hideDefaultChat = Boolean.parseBoolean(f[0]); saveChatLog = Boolean.parseBoolean(f[1]);
                         isLocked = Boolean.parseBoolean(f[2]); showTimeStamps = Boolean.parseBoolean(f[3]);
-                        if (f.length >= 5) showNotifications = Boolean.parseBoolean(f[4]);
+                        if (f.length >= 5) showNotifications    = Boolean.parseBoolean(f[4]);
+                        if (f.length >= 6) soundNotifications   = Boolean.parseBoolean(f[5]);
+                        if (f.length >= 7) windowsNotifications = Boolean.parseBoolean(f[6]);
+                    } else if (line.startsWith("KEYBIND:")) {
+                        String[] p = line.substring(8).split("\\|", 3);
+                        if (p.length == 3) {
+                            try {
+                                List<Integer> kcs = new ArrayList<>();
+                                for (String k : p[0].split(";")) {
+                                    if (!k.isEmpty()) kcs.add(Integer.parseInt(k));
+                                }
+                                keybinds.add(new KeybindEntry(
+                                    kcs, p[1].replace("§p","|"), p[2].replace("§p","|")));
+                            } catch (Exception ignored) {}
+                        }
+                    } else if (line.startsWith("AUTORESPONSE:")) {
+                        String[] p = line.substring(13).split("\\|", 2);
+                        if (p.length == 2) {
+                            autoResponses.add(new AutoResponseEntry(
+                                p[0].replace("§p","|"), p[1].replace("§p","|")));
+                        }
                     } else if (line.startsWith("DISPLAY2:")) {
                         String[] d = line.substring(9).split(",");
                         if (d.length >= 1) fontSizeEnabled       = Boolean.parseBoolean(d[0]);

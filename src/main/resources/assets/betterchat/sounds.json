@@ -1,0 +1,8 @@
+{
+  "notify": {
+    "category": "master",
+    "sounds": [
+      "notify"
+    ]
+  }
+}

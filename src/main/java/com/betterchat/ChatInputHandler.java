@@ -6,6 +6,8 @@ import net.minecraft.client.gui.GuiTextField;
 import net.minecraft.event.ClickEvent;
 
 import java.lang.reflect.Field;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Handles everything related to player input while the chat GUI is open.
@@ -29,6 +31,19 @@ public class ChatInputHandler {
     private long lastPlayerSendTime = 0;
     public static final long SEND_ECHO_DEBOUNCE_MS = 1000;
 
+    // ── Sent-message history ──────────────────────────────────────────────────
+    /** Messages sent this session, oldest-first.  Max 100 entries. */
+    private final List<String> sentHistory = new ArrayList<>();
+    /**
+     * Current position while browsing history.
+     * -1 = not browsing (live input).
+     * 0  = most-recent sent message.
+     * sentHistory.size()-1 = oldest sent message.
+     */
+    private int historyIndex = -1;
+    /** Preserved draft text so we can restore it when the user navigates back down to -1. */
+    private String draftText = "";
+
     public ChatInputHandler(ChatTabData data) {
         this.data = data;
     }
@@ -38,9 +53,7 @@ public class ChatInputHandler {
     // -------------------------------------------------------------------------
 
     /** Call this whenever the player sends a command so responses can be tagged. */
-    public void onPlayerSentCommand() {
-        lastPlayerCommandTime = System.currentTimeMillis();
-    }
+    public void onPlayerSentCommand() { lastPlayerCommandTime = System.currentTimeMillis(); }
 
     public long getLastPlayerCommandTime()  { return lastPlayerCommandTime; }
     public long getLastPlayerSendTime()     { return lastPlayerSendTime; }
@@ -71,6 +84,18 @@ public class ChatInputHandler {
 
         if (rawText.isEmpty()) return true; // close GUI, nothing to send
 
+        // Save to our own history (newest at the end; navigation goes from end → start)
+        if (!rawText.trim().isEmpty()) {
+            // Don't duplicate the most-recent entry
+            if (sentHistory.isEmpty() || !sentHistory.get(sentHistory.size() - 1).equals(rawText)) {
+                sentHistory.add(rawText);
+                if (sentHistory.size() > 100) sentHistory.remove(0);
+            }
+        }
+        // Reset history cursor
+        historyIndex = -1;
+        draftText    = "";
+
         int globalIdx = data.windows.isEmpty() ? 0 : data.windows.get(0).getSelectedGlobalIndex();
         String prefix    = data.tabPrefixes.getOrDefault(globalIdx, "");
         String suffix    = data.tabSuffixes.getOrDefault(globalIdx, "");
@@ -84,6 +109,45 @@ public class ChatInputHandler {
         lastPlayerSendTime = System.currentTimeMillis();
         data.lastMessageTime = System.currentTimeMillis();
         return true;
+    }
+
+    // -------------------------------------------------------------------------
+    // History navigation  (called from ChatTabHandler.onKeyTyped)
+    // -------------------------------------------------------------------------
+
+    /**
+     * Navigate sent-message history via arrow keys.
+     *
+     * @param up   true = KEY_UP (go to older message), false = KEY_DOWN (go to newer)
+     * @param field the custom chat text field to update
+     */
+    public void navigateHistory(boolean up, GuiTextField field) {
+        if (sentHistory.isEmpty() || field == null) return;
+
+        if (up) {
+            // Moving into history for the first time — save the current draft
+            if (historyIndex == -1) draftText = field.getText();
+            if (historyIndex < sentHistory.size() - 1) historyIndex++;
+        } else {
+            if (historyIndex == -1) return; // already at live input, nothing to do
+            historyIndex--;
+        }
+
+        if (historyIndex == -1) {
+            // Returned past the most-recent entry → restore draft
+            field.setText(draftText);
+        } else {
+            // Index 0 = most-recent, so invert to index from the end
+            int realIdx = sentHistory.size() - 1 - historyIndex;
+            field.setText(sentHistory.get(realIdx));
+        }
+        field.setCursorPositionEnd();
+    }
+
+    /** Call when the chat GUI is opened so fresh navigation always starts at -1. */
+    public void resetHistoryCursor() {
+        historyIndex = -1;
+        draftText    = "";
     }
 
     // -------------------------------------------------------------------------
