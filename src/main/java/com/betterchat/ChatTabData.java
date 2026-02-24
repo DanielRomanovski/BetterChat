@@ -5,70 +5,122 @@ import net.minecraft.util.IChatComponent;
 import java.io.*;
 import java.text.SimpleDateFormat;
 import java.util.*;
+import java.util.Locale;
 
+/**
+ * Holds all persistent state for the mod: tabs, windows, colours, flags, and the
+ * full chat history. Also owns load/save logic and the filter-matching rules.
+ *
+ * Nothing in here renders or handles input — it is pure data and business logic.
+ */
 public class ChatTabData {
+
+    /** Display names of every tab, in order. Index into this to get per-tab settings. */
     public final List<String> tabs = new ArrayList<>();
 
-    // -------------------------------------------------------------------------
-    // Global raw log — every message ever received, never deleted
-    // -------------------------------------------------------------------------
+    // Every message ever received is kept here forever so that re-filtering a tab
+    // can always reconstruct the correct history without losing anything.
     public List<ChatMessage> globalLog = new ArrayList<>();
 
-    // Per-tab settings (keyed by tab index)
-    public final Map<Integer, String> tabFilters = new HashMap<>();
-    public final Map<Integer, String> tabExclusions = new HashMap<>();
-    public final Map<Integer, Boolean> serverMessageFilters = new HashMap<>();
-    public final Map<Integer, Boolean> includeAllFilters = new HashMap<>();
-    public final Map<Integer, Boolean> includeCommandsFilters = new HashMap<>();
-    public final Map<Integer, Boolean> includePlayersFilters = new HashMap<>();
+    // Per-tab filter settings, keyed by tab index.
+    public final Map<Integer, String>  tabFilters                   = new HashMap<>();
+    public final Map<Integer, String>  tabExclusions                = new HashMap<>();
+    public final Map<Integer, Boolean> serverMessageFilters         = new HashMap<>();
+    public final Map<Integer, Boolean> includeAllFilters            = new HashMap<>();
+    public final Map<Integer, Boolean> includeCommandsFilters       = new HashMap<>();
+    public final Map<Integer, Boolean> includePlayersFilters        = new HashMap<>();
     public final Map<Integer, Boolean> includeCommandResponseFilters = new HashMap<>();
-    public final Map<Integer, String> tabPrefixes = new HashMap<>();
-    public final Map<Integer, String> tabSuffixes = new HashMap<>();
-    public final Map<Integer, Integer> scrollOffsets = new HashMap<>();
-    public final Map<Integer, Boolean> tabNotifications = new HashMap<>();
+    public final Map<Integer, String>  tabPrefixes                  = new HashMap<>();
+    public final Map<Integer, String>  tabSuffixes                  = new HashMap<>();
+    public final Map<Integer, Integer> scrollOffsets                = new HashMap<>();
+    public final Map<Integer, Boolean> tabNotifications             = new HashMap<>();
 
-    /** Incremented whenever any filter setting changes — used to invalidate rendered line caches. */
+    /** Bumped every time any filter changes, so ChatRenderer knows to rebuild its line cache. */
     public int filterVersion = 0;
 
-    /** The player name at last login — used for filter matching in the global log. */
+    /** Player's username — kept in sync on each received message for filter matching. */
     public String playerName = "";
 
+    /** Timestamp of the last received message, used to drive the HUD fade timer. */
     public long lastMessageTime = 0;
 
-    // Legacy single-window fields (window[0] is the primary)
+    // Position/size of window 0. Kept in sync with windows.get(0) and written to the config.
     public int windowX = 20, windowY = 20, windowWidth = 340, windowHeight = 172;
     public int lastResW = -1, lastResH = -1;
+    // Saved position/size used when isLocked = true, along with the resolution it was saved at.
     public int lockedX, lockedY, lockedW, lockedH, lockedResW, lockedResH;
 
-    public String colorSelection = "7171ad", colorTopBar = "15151a", colorBackground = "15151a", colorText = "FFFFFF", colorTime = "555555", colorInput = "000000";
-    public int opacSelection = 255, opacTopBar = 255, opacBackground = 188, opacText = 255, opacTime = 255, opacInput = 204;
+    // Colour hex strings and alpha values for each UI element.
+    public String colorSelection = "7171ad", colorTopBar = "15151a", colorBackground = "15151a",
+                  colorText = "FFFFFF", colorTime = "555555", colorInput = "000000";
+    public int opacSelection = 255, opacTopBar = 255, opacBackground = 188,
+               opacText = 255, opacTime = 255, opacInput = 204;
+    // Separate fade colours shown on the HUD overlay (can be set to 0 alpha to hide them).
     public String colorFadeTopBar = "000000", colorFadeBackground = "000000";
     public int opacFadeTopBar = 0, opacFadeBackground = 0;
 
-    public boolean hideDefaultChat = true;
-    public boolean saveChatLog = true;
-    public boolean isLocked = false;
-    public boolean showTimeStamps = true;
+    // Feature flags
+    public boolean hideDefaultChat  = true;
+    public boolean saveChatLog      = true;
+    public boolean isLocked         = false;
+    public boolean showTimeStamps   = true;
     public boolean showNotifications = true;
 
+    // Chat display features
+    /** Master toggle — when true, all custom-font sub-settings are active. */
+    public boolean fontSizeEnabled       = false;
+    /** Font scale for chat message text. 1.0 = default MC size. */
+    public float   fontSize              = 1.0f;
+    /** Name of the system font to use for chat message text, or "" to use Minecraft's built-in font. */
+    public String  fontName              = "";
+    /** Whether a custom font is enabled for message text. */
+    public boolean fontEnabled           = false;
+    /** Font scale for tab labels. */
+    public float   fontSizeTabs          = 1.0f;
+    /** Name of the system font to use for tab labels, or "" to use Minecraft's built-in font. */
+    public String  fontNameTabs          = "";
+    /** Whether a custom font is enabled for tab labels. */
+    public boolean fontTabsEnabled       = false;
+    /** Font scale for timestamps and date dividers. */
+    public float   fontSizeTimestamps    = 1.0f;
+    /** Name of the system font to use for timestamps and date dividers, or "" to use Minecraft's built-in font. */
+    public String  fontNameTimestamps    = "";
+    /** Whether a custom font is enabled for timestamps and date dividers. */
+    public boolean fontTimestampsEnabled = false;
+    /** When true, consecutive identical messages are collapsed to "msg <xN>". */
+    public boolean messageCombining      = true;
+    /** When true, removes the surrounding angle brackets from player names:  <Name> → Name: */
+    public boolean stripPlayerBrackets   = false;
+
+    // Mute/ignore lists (player name → expiry ms, or Long.MAX_VALUE for permanent)
+    public final Map<String, Long>    mutedPlayers  = new HashMap<>(); // temp + perma mute
+    public final java.util.Set<String> ignoredPlayers = new java.util.HashSet<>(); // ignore (hide messages)
+
     // -------------------------------------------------------------------------
-    // Multi-window support
+    // ChatWindowInstance  —  one draggable/resizable chat window on screen
     // -------------------------------------------------------------------------
+
+    /** Represents one chat window. A window holds an ordered list of tab indices
+     *  and remembers which one is currently selected. */
     public static class ChatWindowInstance {
         public int x, y, width, height;
+        /** Global tab indices shown in this window, left to right. */
         public List<Integer> tabIndices = new ArrayList<>();
+        /** Local (within this window) index of the active tab. */
         public int selectedLocalTab = 0;
 
         public ChatWindowInstance(int x, int y, int w, int h) {
             this.x = x; this.y = y; this.width = w; this.height = h;
         }
 
+        /** Returns the global tab index of the currently selected tab, or -1 if empty. */
         public int getSelectedGlobalIndex() {
             if (tabIndices.isEmpty()) return -1;
             if (selectedLocalTab >= tabIndices.size()) selectedLocalTab = 0;
             return tabIndices.get(selectedLocalTab);
         }
 
+        /** Selects the tab with the given global index, if it exists in this window. */
         public void selectGlobalTab(int globalIdx) {
             int local = tabIndices.indexOf(globalIdx);
             if (local != -1) selectedLocalTab = local;
@@ -80,33 +132,48 @@ public class ChatTabData {
     private final File configFile;
     private final File logFile;
 
+    // -------------------------------------------------------------------------
+    // ChatMessage  —  one entry in globalLog
+    // -------------------------------------------------------------------------
+
+    /** One chat message as received from the server, plus classification flags used for filtering. */
     public static class ChatMessage implements Serializable {
         private static final long serialVersionUID = 2L;
-        public String text, time, date;
-        public boolean isDateSeparator;
-        public transient IChatComponent rawComponent;
-        // Raw classification fields stored so we can re-filter without re-parsing
-        public boolean isLocal;
-        public boolean isOtherPlayer;
-        public boolean isCommand;
-        public boolean isCommandResponse;
-        public String plainText; // unformatted, for filter matching
+        public String text;       // formatted text (with colour codes)
+        public String time;       // "HH:mm" timestamp
+        public String date;       // "yyyy/MM/dd" date, used for date-separator grouping
+        public boolean isDateSeparator;                 // true for injected date-divider rows
+        public transient IChatComponent rawComponent;   // the original component for hover/click events
+        // Classification used by the filter engine
+        public boolean isLocal;           // sent by this player
+        public boolean isOtherPlayer;     // sent by another player
+        public boolean isCommand;         // starts with "/"
+        public boolean isCommandResponse; // arrived shortly after a player command
+        public String  plainText;         // unformatted, for keyword matching
+        // Message combining — groupId links consecutive identical messages together.
+        // repeatCount on the LAST message of the group holds how many are in the group.
+        // Never mutated after being set; render-time only.
+        public int    repeatCount = 1;  // count of identical messages in this group (set on last msg)
+        public int    groupId     = 0;  // non-zero means this message belongs to a combine group
 
+        /** Constructor for date separator rows. */
         public ChatMessage(String text, boolean isSeparator) {
             this.text = text; this.isDateSeparator = isSeparator;
             this.time = new SimpleDateFormat("HH:mm").format(new Date());
             this.date = new SimpleDateFormat("yyyy/MM/dd").format(new Date());
         }
+
+        /** Full constructor for real chat messages. */
         public ChatMessage(String text, boolean isSeparator, IChatComponent component,
                            boolean isLocal, boolean isOtherPlayer, boolean isCommand,
                            boolean isCommandResponse, String plainText) {
             this(text, isSeparator);
-            this.rawComponent = component;
-            this.isLocal = isLocal;
-            this.isOtherPlayer = isOtherPlayer;
-            this.isCommand = isCommand;
+            this.rawComponent      = component;
+            this.isLocal           = isLocal;
+            this.isOtherPlayer     = isOtherPlayer;
+            this.isCommand         = isCommand;
             this.isCommandResponse = isCommandResponse;
-            this.plainText = plainText;
+            this.plainText         = plainText;
         }
     }
 
@@ -118,17 +185,128 @@ public class ChatTabData {
         load();
     }
 
+    /** Converts a hex colour string + alpha byte into a packed ARGB int. */
     public int getHex(String hex, int alpha) {
-        try { return (alpha << 24) | Integer.parseInt(hex.replace("#",""), 16); }
+        try { return (alpha << 24) | Integer.parseInt(hex.replace("#", ""), 16); }
         catch (Exception e) { return (alpha << 24) | 0xFFFFFF; }
     }
 
     // -------------------------------------------------------------------------
-    // Filter matching — test a single raw message against a tab's settings
+    // Filter matching
     // -------------------------------------------------------------------------
+
+    /**
+     * Returns true if a message should appear in the given tab.
+     * Checks exclusion keywords first, then inclusion rules.
+     * Date separator rows are never matched (they are injected by the renderer).
+     */
+    /**
+     * If stripPlayerBrackets is on, converts  "&lt;Name&gt; text" → "Name: text"
+     * for display. The original msg.text is never mutated.
+     */
+    public String applyBracketStrip(String text) {
+        if (!stripPlayerBrackets) return text;
+        // Match  <Name>  at the start (with optional colour codes before the bracket)
+        // Pattern: optional §x codes, then '<', then name chars, then '>', then space
+        String stripped = text;
+        // Strip leading colour codes to find the '<'
+        int start = 0;
+        while (start + 1 < stripped.length() && stripped.charAt(start) == '\u00A7') start += 2;
+        if (start < stripped.length() && stripped.charAt(start) == '<') {
+            int end = stripped.indexOf('>', start);
+            if (end != -1 && end + 1 < stripped.length()) {
+                String name = stripped.substring(start + 1, end);
+                String rest = stripped.substring(end + 1);
+                // Preserve any colour codes that were before the '<'
+                String prefix = stripped.substring(0, start);
+                stripped = prefix + name + ":" + rest;
+            }
+        }
+        return stripped;
+    }
+
+    /** Returns the player name from a plain-text chat message using multiple strategies.
+     *  1. Strips colour codes, then looks for &lt;Name&gt; (vanilla format).
+     *  2. Falls back to the word immediately before the first ": " separator
+     *     which covers "[RANK] Name: msg" (Hypixel, most servers).
+     *  Returns null if nothing plausible is found. */
+    public static String extractPlayerName(String plainText) {
+        if (plainText == null || plainText.isEmpty()) return null;
+
+        // Strip Minecraft colour codes (§x pairs) to get clean plain text
+        String clean = net.minecraft.util.EnumChatFormatting.getTextWithoutFormattingCodes(plainText);
+        if (clean == null || clean.isEmpty()) return null;
+        clean = clean.trim();
+
+        // Strategy 1: classic <Name> format (vanilla servers)
+        int lt = clean.indexOf('<');
+        int gt = lt >= 0 ? clean.indexOf('>', lt + 1) : -1;
+        if (lt >= 0 && gt > lt + 1) {
+            String candidate = clean.substring(lt + 1, gt).trim();
+            if (isPlausibleName(candidate)) return candidate;
+        }
+
+        // Strategy 2: "... Name: message" — find the last word before the first ": "
+        // This covers "[MVP+] PlayerName: hello" and "PlayerName: hello"
+        int colonIdx = clean.indexOf(": ");
+        if (colonIdx > 0) {
+            // Take the substring before ": " and grab the last space-separated token
+            String before = clean.substring(0, colonIdx).trim();
+            int lastSpace = before.lastIndexOf(' ');
+            String candidate = (lastSpace >= 0) ? before.substring(lastSpace + 1) : before;
+            // Strip any trailing punctuation like ] or )
+            candidate = candidate.replaceAll("[\\]\\)>]+$", "").trim();
+            if (isPlausibleName(candidate)) return candidate;
+        }
+
+        return null;
+    }
+
+    /** Returns true if the string looks like a plausible Minecraft player name. */
+    private static boolean isPlausibleName(String s) {
+        if (s == null || s.isEmpty() || s.length() > 40) return false;
+        // Must not contain spaces; should be alphanumeric + _ (MC name rules)
+        return s.matches("[A-Za-z0-9_]{1,40}");
+    }
+
+    /** Tries to extract a player name from a ClickEvent value (e.g. "/msg Name", "/tell Name").
+     *  Returns null if the value doesn't match a known player-targeting command. */
+    public static String extractNameFromClickEvent(net.minecraft.event.ClickEvent ce) {
+        if (ce == null) return null;
+        String val = ce.getValue();
+        if (val == null) return null;
+        String[] prefixes = {"/msg ", "/tell ", "/w ", "/whisper ", "/pm ", "/dm ",
+                             "/r ", "/reply ", "/friend add ", "/ignore "};
+        for (String p : prefixes) {
+            if (val.toLowerCase().startsWith(p)) {
+                String rest = val.substring(p.length()).trim();
+                int sp = rest.indexOf(' ');
+                String name = sp > 0 ? rest.substring(0, sp) : rest;
+                if (isPlausibleName(name)) return name;
+            }
+        }
+        return null;
+    }
+
+    /** Returns true if this player is currently muted (temp or permanent). */
+    public boolean isPlayerMuted(String name) {
+        Long exp = mutedPlayers.get(name);
+        if (exp == null) return false;
+        if (exp == Long.MAX_VALUE) return true;
+        if (System.currentTimeMillis() < exp) return true;
+        mutedPlayers.remove(name); return false;
+    }
+
     public boolean messagePassesFilter(int tabIdx, ChatMessage msg) {
-        if (msg.isDateSeparator) return false; // separators are injected by the renderer
+        if (msg.isDateSeparator) return false;
         String plain = msg.plainText != null ? msg.plainText : msg.text;
+
+        // Mute / ignore checks
+        String sender = extractPlayerName(plain);
+        if (sender != null) {
+            if (ignoredPlayers.contains(sender)) return false;
+            if (isPlayerMuted(sender)) return false;
+        }
 
         // Exclusion check
         String ex = tabExclusions.getOrDefault(tabIdx, "");
@@ -158,8 +336,8 @@ public class ChatTabData {
     }
 
     /**
-     * Build a filtered + date-separated list of messages for a tab by scanning globalLog.
-     * This is called by the renderer's line cache when it needs to rebuild.
+     * Scans globalLog and builds the filtered, date-separated message list for one tab.
+     * Called by ChatRenderer when the line cache needs rebuilding.
      */
     public List<ChatMessage> buildFilteredHistory(int tabIdx) {
         List<ChatMessage> result = new ArrayList<>();
@@ -179,6 +357,8 @@ public class ChatTabData {
     // -------------------------------------------------------------------------
     // Window helpers
     // -------------------------------------------------------------------------
+
+    /** Returns the index of the window that contains the given global tab index, or -1. */
     public int windowIndexForTab(int globalTabIdx) {
         for (int w = 0; w < windows.size(); w++) {
             if (windows.get(w).tabIndices.contains(globalTabIdx)) return w;
@@ -186,6 +366,10 @@ public class ChatTabData {
         return -1;
     }
 
+    /**
+     * Removes a tab from whichever window owns it and opens it in a new window
+     * positioned at (spawnX, spawnY). Empty windows are removed automatically.
+     */
     public ChatWindowInstance detachTab(int globalTabIdx, int spawnX, int spawnY) {
         for (ChatWindowInstance win : windows) {
             win.tabIndices.remove((Integer) globalTabIdx);
@@ -202,6 +386,10 @@ public class ChatTabData {
         return newWin;
     }
 
+    /**
+     * Moves a tab into an existing window. Removes it from its current window first.
+     * Empty windows left behind are removed automatically.
+     */
     public void mergeTabIntoWindow(int globalTabIdx, int targetWindowIdx) {
         ChatWindowInstance target = windows.get(targetWindowIdx);
         if (target.tabIndices.contains(globalTabIdx)) return;
@@ -225,6 +413,8 @@ public class ChatTabData {
     // -------------------------------------------------------------------------
     // Defaults / reset
     // -------------------------------------------------------------------------
+
+    /** Resets all colour and opacity values to their defaults and saves. */
     public void resetToDefaults() {
         colorSelection = "7171ad"; opacSelection = 255;
         colorTopBar = "15151a";    opacTopBar    = 255;
@@ -241,6 +431,8 @@ public class ChatTabData {
     // -------------------------------------------------------------------------
     // Save / Load
     // -------------------------------------------------------------------------
+
+    /** Writes all settings and window layout to betterchat.txt, then saves the message log. */
     public void save() {
         try (PrintWriter writer = new PrintWriter(new FileWriter(configFile))) {
             writer.println("POS:" + windowX + "," + windowY + "," + windowWidth + "," + windowHeight);
@@ -251,6 +443,17 @@ public class ChatTabData {
             writer.println("FADE_STYLE:" + colorFadeTopBar + "," + colorFadeBackground);
             writer.println("FADE_OPAC:" + opacFadeTopBar + "," + opacFadeBackground);
             writer.println("FLAGS_V2:" + hideDefaultChat + "," + saveChatLog + "," + isLocked + "," + showTimeStamps + "," + showNotifications);
+            writer.println("DISPLAY2:" + fontSizeEnabled
+                + "," + String.format(Locale.US, "%.2f", fontSize)
+                + "," + fontEnabled + "," + fontName.replace(",","|")
+                + "," + messageCombining
+                + "," + fontTabsEnabled + "," + fontNameTabs.replace(",","|") + "," + String.format(Locale.US, "%.2f", fontSizeTabs)
+                + "," + fontTimestampsEnabled + "," + fontNameTimestamps.replace(",","|") + "," + String.format(Locale.US, "%.2f", fontSizeTimestamps)
+                + "," + stripPlayerBrackets);
+            // Save muted players: name=expiryMs (Long.MAX_VALUE = permanent)
+            for (Map.Entry<String, Long> e : mutedPlayers.entrySet()) {
+                writer.println("MUTE:" + e.getKey().replace(",", "|") + "," + e.getValue());
+            }
             // Save extra windows (window 0 is saved via POS above)
             for (int w = 1; w < windows.size(); w++) {
                 ChatWindowInstance win = windows.get(w);
@@ -281,12 +484,14 @@ public class ChatTabData {
         } catch (IOException e) { e.printStackTrace(); }
     }
 
+    /** Serialises globalLog to betterchat_logs.dat. */
     private void saveHistory() {
         try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(logFile))) {
             oos.writeObject(globalLog);
         } catch (IOException e) { e.printStackTrace(); }
     }
 
+    /** Reads betterchat.txt and betterchat_logs.dat, populating all fields and windows. */
     @SuppressWarnings("unchecked")
     public void load() {
         tabs.clear(); windows.clear();
@@ -330,6 +535,37 @@ public class ChatTabData {
                         hideDefaultChat = Boolean.parseBoolean(f[0]); saveChatLog = Boolean.parseBoolean(f[1]);
                         isLocked = Boolean.parseBoolean(f[2]); showTimeStamps = Boolean.parseBoolean(f[3]);
                         if (f.length >= 5) showNotifications = Boolean.parseBoolean(f[4]);
+                    } else if (line.startsWith("DISPLAY2:")) {
+                        String[] d = line.substring(9).split(",");
+                        if (d.length >= 1) fontSizeEnabled       = Boolean.parseBoolean(d[0]);
+                        if (d.length >= 2) { try { fontSize = Float.parseFloat(d[1]); } catch (Exception ignored) {} }
+                        if (d.length >= 3) fontEnabled           = Boolean.parseBoolean(d[2]);
+                        if (d.length >= 4) fontName              = d[3].replace("|", ",");
+                        if (d.length >= 5) messageCombining      = Boolean.parseBoolean(d[4]);
+                        if (d.length >= 6) fontTabsEnabled       = Boolean.parseBoolean(d[5]);
+                        if (d.length >= 7) fontNameTabs          = d[6].replace("|", ",");
+                        if (d.length >= 8) { try { fontSizeTabs = Float.parseFloat(d[7]); } catch (Exception ignored) {} }
+                        if (d.length >= 9) fontTimestampsEnabled = Boolean.parseBoolean(d[8]);
+                        if (d.length >= 10) fontNameTimestamps   = d[9].replace("|", ",");
+                        if (d.length >= 11) { try { fontSizeTimestamps = Float.parseFloat(d[10]); } catch (Exception ignored) {} }
+                        if (d.length >= 12) stripPlayerBrackets = Boolean.parseBoolean(d[11]);
+                    } else if (line.startsWith("DISPLAY:")) {
+                        // Legacy format — read what we can
+                        String[] d = line.substring(8).split(",");
+                        if (d.length >= 1) fontSizeEnabled  = Boolean.parseBoolean(d[0]);
+                        if (d.length >= 2) { try { fontSize = Float.parseFloat(d[1]); } catch (Exception ignored) {} }
+                        if (d.length >= 3) fontEnabled      = Boolean.parseBoolean(d[2]);
+                        if (d.length >= 4) fontName         = d[3].replace("|", ",");
+                        if (d.length >= 5) messageCombining = Boolean.parseBoolean(d[4]);
+                    } else if (line.startsWith("MUTE:")) {
+                        String[] m = line.substring(5).split(",");
+                        if (m.length == 2) {
+                            try {
+                                String name = m[0].replace("|", ",");
+                                long exp = Long.parseLong(m[1]);
+                                mutedPlayers.put(name, exp);
+                            } catch (Exception ignored) {}
+                        }
                     } else if (line.startsWith("WINDOW_PRIMARY:")) {
                         primaryWindowRaw = line.substring(15).split(",");
                     } else if (line.startsWith("WINDOW:")) {
@@ -413,6 +649,8 @@ public class ChatTabData {
     // -------------------------------------------------------------------------
     // Tab management
     // -------------------------------------------------------------------------
+
+    /** Adds a new blank tab to window 0 and saves. */
     public void addTab() {
         tabs.add("New Tab"); int idx = tabs.size() - 1;
         tabFilters.put(idx, "");
@@ -424,6 +662,10 @@ public class ChatTabData {
         save();
     }
 
+    /**
+     * Deletes a tab by global index. Removes it from all windows, shifts indices
+     * for tabs that came after it, and saves.
+     */
     public void deleteTab(int globalIdx) {
         if (tabs.size() <= 1 || globalIdx < 0 || globalIdx >= tabs.size()) return;
         tabs.remove(globalIdx);
@@ -447,6 +689,7 @@ public class ChatTabData {
         save();
     }
 
+    /** After a tab is deleted, shifts all per-tab setting maps down by one from removedIdx. */
     private void rebuildSettingMapsAfterDeletion(int removedIdx) {
         int size = tabs.size() + 1; // tabs already shrank, so +1 is the old size
         for (int i = removedIdx; i < size - 1; i++) {
@@ -471,10 +714,10 @@ public class ChatTabData {
         scrollOffsets.remove(last); tabNotifications.remove(last);
     }
 
+    /** Swaps two tabs within the same window by their local indices. */
     public void swapTabsInWindow(ChatWindowInstance win, int localA, int localB) {
         if (localA < 0 || localB < 0 || localA >= win.tabIndices.size() || localB >= win.tabIndices.size()) return;
         Collections.swap(win.tabIndices, localA, localB);
         save();
     }
 }
-
