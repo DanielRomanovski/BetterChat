@@ -41,6 +41,9 @@ public class ChatInputHandler {
     /** The global tab index the player was on when they last sent a message. -1 if unknown. */
     private int lastSentFromTabIndex = -1;
 
+    /** The raw (pre-prefix/suffix) text of the last message the player sent. */
+    private String lastSentRawText = "";
+
     // ── Sent-message history ──────────────────────────────────────────────────
     /** Messages sent this session, oldest-first.  Max 100 entries. */
     private final List<String> sentHistory = new ArrayList<>();
@@ -76,6 +79,7 @@ public class ChatInputHandler {
     public long getLastPlayerCommandTime()  { return lastPlayerCommandTime; }
     public long getLastPlayerSendTime()     { return lastPlayerSendTime; }
     public int  getLastSentFromTabIndex()   { return lastSentFromTabIndex; }
+    public String getLastSentRawText()      { return lastSentRawText; }
 
     /** Returns true if the next server message should be treated as a command response. */
     public boolean isWithinCommandResponseWindow() {
@@ -123,6 +127,7 @@ public class ChatInputHandler {
 
         if (finalText.startsWith("/")) onPlayerSentCommand();
         else                           onPlayerSentChat();
+        lastSentRawText = rawText;
         if (inputField != null)    inputField.setText("");
         if (customChatField != null) customChatField.setText("");
 

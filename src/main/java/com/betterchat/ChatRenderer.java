@@ -370,6 +370,8 @@ public class ChatRenderer {
             if (line.isSeparator) {
                 int tw = mc.fontRendererObj.getStringWidth(line.text);
                 int cx = win.x + win.width / 2;
+                // Reset GL color modulator before rects — FontRenderer can leave it dirty.
+                GL11.glColor4f(1f, 1f, 1f, 1f);
                 Gui.drawRect(win.x + 5, y + 4, cx - tw / 2 - 5, y + 5, 0x22FFFFFF);
                 Gui.drawRect(cx + tw / 2 + 5, y + 4, win.x + win.width - 5, y + 5, 0x22FFFFFF);
                 int sepColor = 0xAAAAAA | (globalAlpha << 24);

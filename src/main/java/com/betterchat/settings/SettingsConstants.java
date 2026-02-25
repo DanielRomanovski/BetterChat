@@ -51,7 +51,8 @@ public final class SettingsConstants {
 
     public static final String[] COLOR_LABELS = {
         "Selection", "Top Bar", "Background", "Text",
-        "Timestamp", "Input Bar", "Top Bar Fade", "BG Fade"
+        "Timestamp", "Input Bar", "Top Bar Fade", "BG Fade",
+        "Multi Window Border"
     };
 }
 

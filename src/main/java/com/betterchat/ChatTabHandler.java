@@ -81,8 +81,12 @@ public class ChatTabHandler {
     private int     scrollBarDragStartOffset = 0;
 
     // ── HUD fade ──────────────────────────────────────────────────────────────
-    /** Timestamp when the HUD fade was last triggered by a visible message. -1 = never shown. */
-    private long hudFadeStartTime = -1L;
+    /**
+     * Per-window HUD fade start time.  Only windows whose selected tab actually
+     * received the triggering message are added here, so windows that didn't
+     * show the message never render the HUD overlay (and never go white).
+     */
+    private final Map<ChatTabData.ChatWindowInstance, Long> hudFadeStartTimes = new HashMap<>();
 
     // -------------------------------------------------------------------------
     // Screen helpers
@@ -121,7 +125,6 @@ public class ChatTabHandler {
         // ── Poll keybinds ────────────────────────────────────────────────────
         for (ChatTabData.KeybindEntry kb : data.keybinds) {
             if (!kb.message.isEmpty() && !kb.keyCodes.isEmpty()) {
-                // All keys in the combo must be held simultaneously
                 boolean pressed = true;
                 for (int kc : kb.keyCodes) {
                     if (!org.lwjgl.input.Keyboard.isKeyDown(kc)) { pressed = false; break; }
@@ -137,31 +140,56 @@ public class ChatTabHandler {
             }
         }
 
-        if (hudFadeStartTime < 0) return;
-        long elapsed = System.currentTimeMillis() - hudFadeStartTime;
-        if (elapsed >= 7000) {
-            hudFadeStartTime = -1L; // fully expired — reset so we don't re-enter next frame
-            return;
-        }
-        float fade = (elapsed > 6000)
-                ? Math.max(0f, 1.0f - (float)(elapsed - 6000) / 1000f)
-                : 1.0f;
-        int fadeAlpha = (int)(fade * 255);
-        if (fadeAlpha <= 0) {
-            hudFadeStartTime = -1L;
-            return;
-        }
+        if (hudFadeStartTimes.isEmpty()) return;
 
-        for (ChatTabData.ChatWindowInstance win : data.windows) {
+        long now = System.currentTimeMillis();
+        // Render only windows that have an active fade entry
+        java.util.Iterator<Map.Entry<ChatTabData.ChatWindowInstance, Long>> it =
+                hudFadeStartTimes.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<ChatTabData.ChatWindowInstance, Long> entry = it.next();
+            ChatTabData.ChatWindowInstance win = entry.getKey();
+            long startTime = entry.getValue();
+            long elapsed = now - startTime;
+
+            if (elapsed >= 7000) {
+                it.remove();
+                continue;
+            }
+
+            float fade = (elapsed > 6000)
+                    ? Math.max(0f, 1.0f - (float)(elapsed - 6000) / 1000f)
+                    : 1.0f;
+            int fadeAlpha = (int)(fade * 255);
+            if (fadeAlpha <= 0) {
+                it.remove();
+                continue;
+            }
+
             int bgColor  = applyFadeToColor(data.getHex(data.colorFadeBackground, data.opacFadeBackground), fadeAlpha);
             int barColor = applyFadeToColor(data.getHex(data.colorFadeTopBar,     data.opacFadeTopBar),     fadeAlpha);
-            Gui.drawRect(win.x, win.y + 22, win.x + win.width, win.y + win.height, bgColor);
-            Gui.drawRect(win.x, win.y,      win.x + win.width, win.y + 22,         barColor);
+            // Enable blending before any drawRect so semi/fully-transparent colours
+            // composite correctly.  Skip zero-alpha rects entirely — drawing 0x00000000
+            // without blending caused a solid-white flash on some drivers.
             GL11.glEnable(GL11.GL_BLEND);
             GL11.glBlendFunc(GL11.GL_SRC_ALPHA, GL11.GL_ONE_MINUS_SRC_ALPHA);
-            GL11.glColor4f(1f, 1f, 1f, fade);
-            renderer.renderWindowContent(mc, win, fadeAlpha, true);
+            // Ensure the GL color modulator is neutral before every rect/text draw.
+            // DO NOT use glColor4f(1,1,1,fade) here — renderWindowContent already bakes
+            // fadeAlpha into every color it draws via the globalAlpha parameter, so the
+            // modulator is unnecessary. Using it caused MC's FontRenderer to leave
+            // glColor4f(1,1,1,1) (opaque white) in GL state after drawing text, which
+            // then composited as solid white on the next window's background rects.
             GL11.glColor4f(1f, 1f, 1f, 1f);
+            if ((bgColor >>> 24) != 0)
+                Gui.drawRect(win.x, win.y + 22, win.x + win.width, win.y + win.height, bgColor);
+            if ((barColor >>> 24) != 0)
+                Gui.drawRect(win.x, win.y,      win.x + win.width, win.y + 22,         barColor);
+            // Render text content — globalAlpha (= fadeAlpha) is baked into each colour
+            // inside renderWindowContent, so no glColor modulator needed.
+            renderer.renderWindowContent(mc, win, fadeAlpha, true);
+            // Restore clean state for whatever renders next.
+            GL11.glColor4f(1f, 1f, 1f, 1f);
+            GL11.glDisable(GL11.GL_BLEND);
         }
     }
 
@@ -234,11 +262,10 @@ public class ChatTabHandler {
         int sentFromTab = input.getLastSentFromTabIndex();
 
         boolean passedAnyTab        = false;
-        boolean passedBackgroundTab = false; // true if message went into a tab not currently on screen
-        boolean passedSelectedTab   = false; // true if message went into a tab currently selected in any window
+        boolean passedBackgroundTab = false;
+        // Windows whose currently-selected tab received this message
+        java.util.Set<ChatTabData.ChatWindowInstance> passedWindows = new java.util.HashSet<>();
         for (int i = 0; i < data.tabs.size(); i++) {
-            // Normal filter check; PLUS: if this is the player's own echo arriving within the
-            // debounce window, always show it in the tab they sent from (regardless of filter).
             boolean passes = data.messagePassesFilter(i, msg)
                     || (isLocal && withinDebounce && i == sentFromTab);
             if (passes) {
@@ -248,7 +275,7 @@ public class ChatTabHandler {
                 for (ChatTabData.ChatWindowInstance win : data.windows) {
                     if (win.tabIndices.contains(i)) {
                         if (win.getSelectedGlobalIndex() == i) {
-                            passedSelectedTab = true;
+                            passedWindows.add(win);
                         } else if (!isLocal) {
                             data.tabNotifications.put(i, true);
                             passedBackgroundTab = true;
@@ -261,9 +288,13 @@ public class ChatTabHandler {
         long now = System.currentTimeMillis();
         // For non-echo messages (or after debounce expires), trigger HUD/notifications.
         if (!withinDebounce || !isLocal) {
-            // Only trigger the HUD fade if the message appeared in a currently selected tab
-            if (passedSelectedTab) {
-                hudFadeStartTime = now;
+            // Set a fade entry only for windows whose selected tab actually received the message.
+            // This prevents windows that filtered the message out from rendering the HUD
+            // overlay (which previously caused a solid-white flash on those windows).
+            if (!passedWindows.isEmpty()) {
+                for (ChatTabData.ChatWindowInstance win : passedWindows) {
+                    hudFadeStartTimes.put(win, now);
+                }
                 data.lastMessageTime = now;
             }
 
@@ -616,6 +647,20 @@ public class ChatTabHandler {
         Gui.drawRect(win.x, win.y, win.x + win.width, win.y + tabBarH,
                 data.getHex(data.colorTopBar, data.opacTopBar));
 
+        // Thin accent border on the primary window (winIdx 0) so the player
+        // can see at a glance which window owns the chat-input bar.
+        if (winIdx == 0 && data.windows.size() > 1) {
+            int accentColor = data.getHex(data.colorWindowBorder, data.opacWindowBorder);
+            // top
+            Gui.drawRect(win.x, win.y, win.x + win.width, win.y + 1, accentColor);
+            // bottom of window body
+            Gui.drawRect(win.x, win.y + win.height - 1, win.x + win.width, win.y + win.height, accentColor);
+            // left
+            Gui.drawRect(win.x, win.y, win.x + 1, win.y + win.height, accentColor);
+            // right
+            Gui.drawRect(win.x + win.width - 1, win.y, win.x + win.width, win.y + win.height, accentColor);
+        }
+
         // Custom input bar (window 0 only)
         if (winIdx == 0 && data.hideDefaultChat && mc.currentScreen instanceof GuiChat) {
             GuiTextField vf = input.getVanillaInputField((GuiChat) mc.currentScreen);
@@ -772,6 +817,38 @@ public class ChatTabHandler {
         tabReorderInsertPos     = -1;
     }
 
+    /**
+     * Moves the window at index {@code w} to index 0, making it the primary window
+     * (the one that owns the chat input bar).  The previously primary window is
+     * pushed to index 1.  Drag-state indices are adjusted accordingly and the
+     * custom input field is nulled so it gets re-created at the new position.
+     *
+     * This is called whenever the player clicks on a non-primary window so that
+     * subsequent input (typing, sending) targets that window.
+     */
+    private void promoteWindowToFront(int w) {
+        if (w <= 0 || w >= data.windows.size()) return;
+        // Swap window w with window 0
+        ChatTabData.ChatWindowInstance promoted = data.windows.remove(w);
+        data.windows.add(0, promoted);
+        // Sync the legacy POS fields to the newly promoted window
+        data.windowX      = promoted.x;
+        data.windowY      = promoted.y;
+        data.windowWidth  = promoted.width;
+        data.windowHeight = promoted.height;
+        // Fix up drag-state window indices
+        if (draggingWindowIndex  == w) draggingWindowIndex  = 0;
+        else if (draggingWindowIndex  == 0) draggingWindowIndex  = w;
+        if (resizingWindowIndex  == w) resizingWindowIndex  = 0;
+        else if (resizingWindowIndex  == 0) resizingWindowIndex  = w;
+        if (scrollBarDragWindowIndex == w) scrollBarDragWindowIndex = 0;
+        else if (scrollBarDragWindowIndex == 0) scrollBarDragWindowIndex = w;
+        // Re-create the input field under its new position next draw frame
+        customChatField   = null;
+        lastSentToVanilla = "";
+        data.save();
+    }
+
     // -------------------------------------------------------------------------
     // Mouse click
     // -------------------------------------------------------------------------
@@ -822,6 +899,20 @@ public class ChatTabHandler {
             ChatTabData.ChatWindowInstance win = data.windows.get(w);
             float tabScale = data.fontSizeEnabled ? Math.max(0.5f, Math.min(3.0f, data.fontSizeTabs)) : 1.0f;
             int tabBarH = Math.max(16, (int)(22 * tabScale));
+
+            // ── Quick bounds check — skip windows this click can't possibly hit ──
+            boolean inTopBar  = my >= win.y && my <= win.y + tabBarH;
+            boolean inContent = my > win.y + tabBarH && my < win.y + win.height;
+            boolean inInputBar = my >= win.y + win.height && my <= win.y + win.height + 16;
+            boolean xInWin    = mx >= win.x && mx <= win.x + win.width;
+            if (!xInWin || (!inTopBar && !inContent && !inInputBar)) continue;
+
+            // ── Promote this window to primary (index 0 → gets input bar) ───────
+            if (w != 0) promoteWindowToFront(w);
+            // After promotion the window list has shifted; refresh our local reference
+            // (it is now at index 0) and reset w so the sub-handlers use 0 correctly.
+            w   = 0;
+            win = data.windows.get(0);
 
             // Gear → open settings
             if (btn == 0 && mx >= win.x + win.width - 20 && mx <= win.x + win.width
@@ -1018,15 +1109,55 @@ public class ChatTabHandler {
         // Send message
         if (k == Keyboard.KEY_RETURN && event.gui instanceof GuiChat) {
             input.trySendMessage((GuiChat) event.gui, customChatField);
-            hudFadeStartTime = System.currentTimeMillis();
-            // If a command was injected into globalLog by trySendMessage, invalidate
-            // the line cache for every tab so the new entry shows up immediately.
+            long now = System.currentTimeMillis();
+
             if (!data.globalLog.isEmpty() && data.globalLog.get(data.globalLog.size() - 1).isCommand) {
+                // ── Injected /command (never echoed by server) ──────────────────
+                // Trigger fade only for windows whose selected tab passes the filter.
+                ChatTabData.ChatMessage cmdMsg = data.globalLog.get(data.globalLog.size() - 1);
                 for (int i = 0; i < data.tabs.size(); i++) {
                     renderer.lineCache.remove(i);
                     renderer.lineCacheHistorySize.put(i, -1);
+                    if (data.messagePassesFilter(i, cmdMsg)) {
+                        for (ChatTabData.ChatWindowInstance win : data.windows) {
+                            if (win.getSelectedGlobalIndex() == i) {
+                                hudFadeStartTimes.put(win, now);
+                            }
+                        }
+                    }
+                }
+                data.lastMessageTime = now;
+            } else {
+                // ── Normal chat (server will echo it back as a received message) ──
+                // The echo arrives after the GUI closes, so onChatReceived fires in
+                // HUD-mode and sets per-window fades correctly for all windows.
+                // BUT we also need an eager fade right now for window 0, because the
+                // player just sent the message and expects to see it immediately.
+                // Build a representative ChatMessage and run it through messagePassesFilter
+                // so we only fade windows that would actually show the sent message.
+                String sentText = input.getLastSentRawText();
+                if (!sentText.isEmpty() && !data.windows.isEmpty()) {
+                    String playerName = data.playerName.isEmpty() && Minecraft.getMinecraft().thePlayer != null
+                            ? Minecraft.getMinecraft().thePlayer.getName() : data.playerName;
+                    // The echo will arrive formatted as "<PlayerName> sentText"
+                    String echoPlain = "<" + playerName + "> " + sentText;
+                    ChatTabData.ChatMessage echoMsg = new ChatTabData.ChatMessage(
+                            echoPlain, false, null,
+                            true,  // isLocal
+                            false, false, false, echoPlain);
+                    for (int i = 0; i < data.tabs.size(); i++) {
+                        if (data.messagePassesFilter(i, echoMsg)) {
+                            for (ChatTabData.ChatWindowInstance win : data.windows) {
+                                if (win.getSelectedGlobalIndex() == i) {
+                                    hudFadeStartTimes.put(win, now);
+                                }
+                            }
+                        }
+                    }
+                    data.lastMessageTime = now;
                 }
             }
+
             Minecraft.getMinecraft().displayGuiScreen(null);
             event.setCanceled(true);
             return;

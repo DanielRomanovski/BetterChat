@@ -91,6 +91,7 @@ public class ChatSettingsGui {
             case 5: data.colorInput          = hex; data.opacInput          = opac; break;
             case 6: data.colorFadeTopBar     = hex; data.opacFadeTopBar     = opac; break;
             case 7: data.colorFadeBackground = hex; data.opacFadeBackground = opac; break;
+            case 8: data.colorWindowBorder   = hex; data.opacWindowBorder   = opac; break;
         }
     }
 
@@ -105,6 +106,7 @@ public class ChatSettingsGui {
             case 5: return new String[]{data.colorInput,          "" + data.opacInput};
             case 6: return new String[]{data.colorFadeTopBar,     "" + data.opacFadeTopBar};
             case 7: return new String[]{data.colorFadeBackground, "" + data.opacFadeBackground};
+            case 8: return new String[]{data.colorWindowBorder,   "" + data.opacWindowBorder};
         }
         return new String[]{"FFFFFF", "255"};
     }

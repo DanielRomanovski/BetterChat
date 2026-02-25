@@ -59,6 +59,9 @@ public class ChatTabData {
     // Separate fade colours shown on the HUD overlay (can be set to 0 alpha to hide them).
     public String colorFadeTopBar = "000000", colorFadeBackground = "000000";
     public int opacFadeTopBar = 0, opacFadeBackground = 0;
+    // Accent border drawn around the primary (active) window when multiple windows are open.
+    public String colorWindowBorder = "4E9EFF";
+    public int    opacWindowBorder  = 180;
 
     // Feature flags
     public boolean hideDefaultChat  = true;
@@ -483,6 +486,7 @@ public class ChatTabData {
         colorInput = "000000";     opacInput     = 204;
         colorFadeTopBar = "000000";     opacFadeTopBar     = 0;
         colorFadeBackground = "000000"; opacFadeBackground = 0;
+        colorWindowBorder = "4E9EFF";   opacWindowBorder   = 180;
         showNotifications = true; soundNotifications = true; windowsNotifications = false;
         save();
     }
@@ -501,6 +505,7 @@ public class ChatTabData {
             writer.println("OPAC_V2:" + opacSelection + "," + opacTopBar + "," + opacBackground + "," + opacText + "," + opacTime + "," + opacInput);
             writer.println("FADE_STYLE:" + colorFadeTopBar + "," + colorFadeBackground);
             writer.println("FADE_OPAC:" + opacFadeTopBar + "," + opacFadeBackground);
+            writer.println("WIN_BORDER:" + colorWindowBorder + "," + opacWindowBorder);
             writer.println("FLAGS_V2:" + hideDefaultChat + "," + saveChatLog + "," + isLocked + "," + showTimeStamps + "," + showNotifications + "," + soundNotifications + "," + windowsNotifications);
             // Keybinds: KEYBIND:k1;k2;k3|message|label
             for (KeybindEntry kb : keybinds) {
@@ -604,6 +609,10 @@ public class ChatTabData {
                         String[] o = line.substring(10).split(",");
                         if (o.length >= 1) opacFadeTopBar    = Integer.parseInt(o[0]);
                         if (o.length >= 2) opacFadeBackground = Integer.parseInt(o[1]);
+                    } else if (line.startsWith("WIN_BORDER:")) {
+                        String[] b = line.substring(11).split(",");
+                        if (b.length >= 1) colorWindowBorder = b[0];
+                        if (b.length >= 2) opacWindowBorder  = Integer.parseInt(b[1]);
                     } else if (line.startsWith("FLAGS_V2:")) {
                         String[] f = line.substring(9).split(",");
                         hideDefaultChat = Boolean.parseBoolean(f[0]); saveChatLog = Boolean.parseBoolean(f[1]);

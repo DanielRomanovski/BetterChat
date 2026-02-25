@@ -53,7 +53,7 @@ public class AppearancePage {
     public boolean draggingSettingsBar   = false;
 
     // Hover animation state
-    private final float[] colorHover = new float[8];
+    private final float[] colorHover = new float[9];
     private final float[] cbHover    = new float[13]; // option toggle rows
     public        float   resetHover  = 0f;
 
@@ -165,7 +165,7 @@ public class AppearancePage {
 
     private int measureContent(Minecraft mc) {
         int h = 0;
-        h += 13 + 8 * 20 + 5;  // Colors header + 8 rows + gap
+        h += 13 + 9 * 20 + 5;  // Colors header + 9 rows + gap
         h += 13 + 4 * 16 + 5;  // Options header + 4 toggles + gap
         h += 13 + 16;           // Chat Display header + combine toggle
         h += 16;                // stripPlayerBrackets toggle
@@ -186,7 +186,7 @@ public class AppearancePage {
                              int clipTop, int clipBottom) {
         drawSectionHeader(mc, cx, cy, "Colors");
         cy += 13;
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 9; i++) {
             boolean hov = mx >= cx && mx <= cx + CW && my >= cy && my <= cy + 18
                     && my >= clipTop && my <= clipBottom;
             colorHover[i] = lerp(colorHover[i], hov ? 1f : 0f, 0.3f);
@@ -452,6 +452,7 @@ public class AppearancePage {
             case 5: return new String[]{data.colorInput,          "" + data.opacInput};
             case 6: return new String[]{data.colorFadeTopBar,     "" + data.opacFadeTopBar};
             case 7: return new String[]{data.colorFadeBackground, "" + data.opacFadeBackground};
+            case 8: return new String[]{data.colorWindowBorder,   "" + data.opacWindowBorder};
         }
         return new String[]{"FFFFFF", "255"};
     }
@@ -487,7 +488,7 @@ public class AppearancePage {
 
         // Colors section
         virtualCy += 13;
-        for (int i = 0; i < 8; i++) {
+        for (int i = 0; i < 9; i++) {
             int sw2 = cx + CW - 44;
             if (btn == 0 && mx >= sw2 - 1 && mx <= sw2 + 21
                     && my >= virtualCy + 2 && my <= virtualCy + 14) {
